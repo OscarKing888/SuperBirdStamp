@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-从 birdstamp/gui/resources/app_icon.png (512x512) 生成：
+从 icons/app_icon.png (512x512) 生成：
 - app_icon.ico（Windows，多分辨率）
 - app_icon.icns（macOS，仅 macOS 上通过 iconutil 生成）
 
@@ -19,7 +19,7 @@ from pathlib import Path
 
 # 项目根
 ROOT = Path(__file__).resolve().parent.parent
-RESOURCES = ROOT / "birdstamp" / "gui" / "resources"
+RESOURCES = ROOT / "icons"
 PNG_PATH = RESOURCES / "app_icon.png"
 ICO_PATH = RESOURCES / "app_icon.ico"
 ICONSET_DIR = RESOURCES / "app_icon.iconset"

@@ -253,10 +253,10 @@ class _ReportDBListWidget(QListWidget):
 def _app_icon_paths() -> tuple[Path, Path]:
     """返回 (窗口用图标路径, AppInfoBar 用 PNG 路径)。窗口优先 .ico/.icns，否则 .png。"""
     try:
-        with resources.as_file(resources.files("birdstamp.gui") / "resources") as res:
+        with resources.as_file(resources.files("icons")) as res:
             icon_dir = Path(res)
     except Exception:
-        icon_dir = Path(__file__).resolve().parent / "resources"
+        icon_dir = Path(__file__).resolve().parent / "icons"
     png_path = icon_dir / "app_icon.png"
     ico_path = icon_dir / "app_icon.ico"
     icns_path = icon_dir / "app_icon.icns"

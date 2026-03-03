@@ -34,4 +34,4 @@ packages = [
 ]
 
 [tool.setuptools.package-data]
-"birdstamp.gui" = ["resources/*.json", "resources/*.png", "resources/*.ico", "resources/*.icns"]
+"birdstamp.gui" = ["icons/*.png", "icons/*.ico", "icons/*.icns"]
