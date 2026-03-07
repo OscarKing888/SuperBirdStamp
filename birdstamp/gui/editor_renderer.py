@@ -50,6 +50,25 @@ OUTPUT_FORMAT_OPTIONS               = editor_options.OUTPUT_FORMAT_OPTIONS
 class _BirdStampRendererMixin:
     """Mixin: preview-cache, render-settings, image processing pipeline, render_preview."""
 
+    @staticmethod
+    def _padding_widget_value(widget: Any) -> int:
+        """兼容 QSpinBox / 可编辑 QComboBox 读取边界填充值。"""
+        if widget is None:
+            return _DEFAULT_CROP_PADDING_PX
+        value_attr = getattr(widget, "value", None)
+        if callable(value_attr):
+            try:
+                return int(value_attr())
+            except Exception:
+                pass
+        current_text_attr = getattr(widget, "currentText", None)
+        if callable(current_text_attr):
+            return _parse_padding_value(current_text_attr(), _DEFAULT_CROP_PADDING_PX)
+        text_attr = getattr(widget, "text", None)
+        if callable(text_attr):
+            return _parse_padding_value(text_attr(), _DEFAULT_CROP_PADDING_PX)
+        return _DEFAULT_CROP_PADDING_PX
+
     def _build_preview_overlay_options(self) -> EditorPreviewOverlayOptions:
         """Build editor preview overlay options from the current toolbar UI state."""
         return EditorPreviewOverlayOptions(
@@ -88,10 +107,10 @@ class _BirdStampRendererMixin:
         draw_overlay = f"{self.draw_banner_check.isChecked()}|{self.draw_text_check.isChecked()}"
         r = self._selected_ratio()
         cm = self._selected_center_mode()
-        pt = self.crop_padding_top.value()
-        pb = self.crop_padding_bottom.value()
-        pl = self.crop_padding_left.value()
-        pr = self.crop_padding_right.value()
+        pt = self._padding_widget_value(self.crop_padding_top)
+        pb = self._padding_widget_value(self.crop_padding_bottom)
+        pl = self._padding_widget_value(self.crop_padding_left)
+        pr = self._padding_widget_value(self.crop_padding_right)
         fill = getattr(self, "crop_padding_fill_combo", None)
         fill_val = fill.currentData() if fill is not None and fill.currentData() else "#FFFFFF"
         return f"{base}|{template_name}|{draw_overlay}|{r}|{cm}|{pt}_{pb}_{pl}_{pr}|{fill_val}"
@@ -291,10 +310,10 @@ class _BirdStampRendererMixin:
             "ratio": self._selected_ratio(),
             "center_mode": self._selected_center_mode(),
             "max_long_edge": self._selected_max_long_edge(),
-            "crop_padding_top": self.crop_padding_top.value(),
-            "crop_padding_bottom": self.crop_padding_bottom.value(),
-            "crop_padding_left": self.crop_padding_left.value(),
-            "crop_padding_right": self.crop_padding_right.value(),
+            "crop_padding_top": self._padding_widget_value(self.crop_padding_top),
+            "crop_padding_bottom": self._padding_widget_value(self.crop_padding_bottom),
+            "crop_padding_left": self._padding_widget_value(self.crop_padding_left),
+            "crop_padding_right": self._padding_widget_value(self.crop_padding_right),
             "crop_padding_fill": _safe_color(
                 str(self.crop_padding_fill_combo.currentData() or "#FFFFFF"),
                 "#FFFFFF",

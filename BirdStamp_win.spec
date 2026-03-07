@@ -23,12 +23,12 @@ ultralytics_datas, ultralytics_binaries, ultralytics_hiddenimports = collect_all
 # Project-specific data files
 # --------------------------------------------------------------------------- #
 project_datas = [
-    # Built-in YAML templates
-    ("birdstamp/templates", "birdstamp/templates"),
     # YOLO bird-detection model
     ("models", "models"),
-    # Placeholder preview image (includes default.jpg)
+    # App window icon (app_icon.ico / app_icon.png)
     ("icons", "icons"),
+    # Placeholder preview image (default.jpg)
+    ("images", "images"),
     # Config and JSON templates (birdstamp.cfg, config/templates/*.json)
     ("config", "config"),
 ]

@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QSlider,
     QToolButton,
+    QTreeWidget,
     QTreeWidgetItem,
 )
 
@@ -70,6 +71,20 @@ class PhotoListWidget(FileListPanel):
     # ------------------------------------------------------------------
 
     def _configure_editor_compat_view(self) -> None:
+        # FileListPanel now uses FileTableView (QTreeView + model). PhotoListWidget
+        # needs the QTreeWidget item API, so replace it in the stacked widget.
+        old_view = self._tree_widget
+        idx = self._stack.indexOf(old_view)
+        new_tw = QTreeWidget()
+        if idx >= 0:
+            self._stack.insertWidget(idx, new_tw)
+            self._stack.removeWidget(old_view)
+            old_view.deleteLater()
+        else:
+            self._stack.addWidget(new_tw)
+        self._stack.setCurrentWidget(new_tw)
+        self._tree_widget = new_tw
+
         # 强制使用列表模式，避免主编辑器使用 QTreeWidget API 时与缩略图模式语义冲突。
         self._set_view_mode(self._MODE_LIST)
 

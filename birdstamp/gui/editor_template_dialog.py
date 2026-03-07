@@ -15,7 +15,7 @@ from typing import Any
 
 from PIL import Image
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QImage, QLinearGradient, QPainter, QPixmap
+from PyQt6.QtGui import QColor, QImage, QIntValidator, QLinearGradient, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -435,6 +435,41 @@ class _CropPaddingEditorWidget(QWidget):
     """可复用的裁切边界填充 + 外圈填充色编辑 Widget。"""
 
     changed = pyqtSignal()
+    _COMMON_PADDING_VALUES = [
+        -1024,
+        -768,
+        -512,
+        -384,
+        -256,
+        -192,
+        -128,
+        -96,
+        -64,
+        -48,
+        -32,
+        -24,
+        -16,
+        -12,
+        -8,
+        -4,
+        0,
+        4,
+        8,
+        12,
+        16,
+        24,
+        32,
+        48,
+        64,
+        96,
+        128,
+        192,
+        256,
+        384,
+        512,
+        768,
+        1024,
+    ]
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -450,36 +485,41 @@ class _CropPaddingEditorWidget(QWidget):
         grid.setColumnStretch(1, 1)
         grid.setColumnStretch(2, 1)
 
-        def _make_spin_slider(label: str) -> tuple[QWidget, QSpinBox, QSlider]:
+        def _make_combo_slider(label: str) -> tuple[QWidget, QComboBox, QSlider]:
             w = QWidget()
             w.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
             wl = QVBoxLayout(w)
             wl.setContentsMargins(0, 0, 0, 0)
             wl.setSpacing(2)
-            spin = QSpinBox()
-            spin.setRange(-9999, 9999)
-            spin.setValue(_DEFAULT_CROP_PADDING_PX)
-            spin.setSuffix(" px")
-            spin.setAccessibleName(label)
-            _configure_spinbox_minimum_width(spin, sample_text="-9999 px")
-            wl.addWidget(spin)
+            combo = QComboBox()
+            combo.setEditable(True)
+            combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+            combo.setAccessibleName(label)
+            combo.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
+            combo.addItems([str(value) for value in self._COMMON_PADDING_VALUES])
+            combo.setCurrentText(str(_DEFAULT_CROP_PADDING_PX))
+            line_edit = combo.lineEdit()
+            if line_edit is not None:
+                line_edit.setValidator(QIntValidator(-9999, 9999, combo))
+                line_edit.setPlaceholderText("输入像素值(px)")
+            combo.setMinimumWidth(max(combo.minimumWidth(), combo.fontMetrics().horizontalAdvance("-9999") + 52))
+            combo.currentTextChanged.connect(lambda _text, c=combo: self._on_padding_combo_changed(c))
+            wl.addWidget(combo)
             slider = QSlider(Qt.Orientation.Horizontal)
             slider.setRange(-2048, 2048)
             slider.setSingleStep(1)
             slider.setPageStep(16)
             slider.setValue(max(slider.minimum(), min(slider.maximum(), _DEFAULT_CROP_PADDING_PX)))
-            slider.setMinimumWidth(max(96, spin.minimumWidth()))
+            slider.setMinimumWidth(max(96, combo.minimumWidth()))
             slider.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
             wl.addWidget(slider)
-            spin.valueChanged.connect(lambda v, s=slider: self._sync_slider(s, v))
-            slider.valueChanged.connect(lambda v, sp=spin: self._sync_spin(sp, v))
-            spin.valueChanged.connect(self._emit_changed)
-            return w, spin, slider
+            slider.valueChanged.connect(lambda v, c=combo: self._sync_combo(c, v))
+            return w, combo, slider
 
-        top_w, self.top_spin, self.top_slider = _make_spin_slider("上")
-        left_w, self.left_spin, self.left_slider = _make_spin_slider("左")
-        right_w, self.right_spin, self.right_slider = _make_spin_slider("右")
-        bot_w, self.bottom_spin, self.bottom_slider = _make_spin_slider("下")
+        top_w, self.top_spin, self.top_slider = _make_combo_slider("上")
+        left_w, self.left_spin, self.left_slider = _make_combo_slider("左")
+        right_w, self.right_spin, self.right_slider = _make_combo_slider("右")
+        bot_w, self.bottom_spin, self.bottom_slider = _make_combo_slider("下")
 
         grid.addWidget(top_w, 0, 1, Qt.AlignmentFlag.AlignCenter)
         grid.addWidget(left_w, 1, 0, Qt.AlignmentFlag.AlignCenter)
@@ -512,6 +552,30 @@ class _CropPaddingEditorWidget(QWidget):
 
         self._blocking = False
 
+    @staticmethod
+    def _format_padding_text(value: int) -> str:
+        return str(int(value))
+
+    @staticmethod
+    def _parse_padding_text(value: str) -> int:
+        text = str(value or "").strip().lower().replace("px", "").strip()
+        if not text:
+            return 0
+        try:
+            return int(text)
+        except Exception:
+            return 0
+
+    def _set_combo_value(self, combo: QComboBox, value: int) -> None:
+        text = self._format_padding_text(value)
+        if combo.currentText() == text:
+            return
+        combo.blockSignals(True)
+        try:
+            combo.setCurrentText(text)
+        finally:
+            combo.blockSignals(False)
+
     def _sync_slider(self, slider: QSlider, value: int) -> None:
         clamped = max(slider.minimum(), min(slider.maximum(), value))
         if slider.value() == clamped:
@@ -522,10 +586,23 @@ class _CropPaddingEditorWidget(QWidget):
         finally:
             slider.blockSignals(False)
 
-    def _sync_spin(self, spin: QSpinBox, value: int) -> None:
-        if spin.value() == value:
-            return
-        spin.setValue(value)
+    def _sync_combo(self, combo: QComboBox, value: int) -> None:
+        self._set_combo_value(combo, value)
+        self._emit_changed()
+
+    def _on_padding_combo_changed(self, combo: QComboBox) -> None:
+        value = self._parse_padding_text(combo.currentText())
+        self._set_combo_value(combo, value)
+        slider_map = {
+            self.top_spin: self.top_slider,
+            self.bottom_spin: self.bottom_slider,
+            self.left_spin: self.left_slider,
+            self.right_spin: self.right_slider,
+        }
+        slider = slider_map.get(combo)
+        if slider is not None:
+            self._sync_slider(slider, value)
+        self._emit_changed()
 
     def _on_fill_combo_changed(self, *_: Any) -> None:
         self._refresh_fill_swatch()
@@ -566,19 +643,19 @@ class _CropPaddingEditorWidget(QWidget):
         """Set all values without emitting changed."""
         self._blocking = True
         try:
-            for spin, slider, val in (
+            for combo, slider, val in (
                 (self.top_spin, self.top_slider, top),
                 (self.bottom_spin, self.bottom_slider, bottom),
                 (self.left_spin, self.left_slider, left),
                 (self.right_spin, self.right_slider, right),
             ):
-                spin.blockSignals(True)
+                combo.blockSignals(True)
                 slider.blockSignals(True)
                 try:
-                    spin.setValue(val)
+                    combo.setCurrentText(self._format_padding_text(val))
                     slider.setValue(max(slider.minimum(), min(slider.maximum(), val)))
                 finally:
-                    spin.blockSignals(False)
+                    combo.blockSignals(False)
                     slider.blockSignals(False)
             self.fill_combo.blockSignals(True)
             try:
@@ -591,10 +668,10 @@ class _CropPaddingEditorWidget(QWidget):
 
     def get_values(self) -> dict[str, Any]:
         return {
-            "crop_padding_top": self.top_spin.value(),
-            "crop_padding_bottom": self.bottom_spin.value(),
-            "crop_padding_left": self.left_spin.value(),
-            "crop_padding_right": self.right_spin.value(),
+            "crop_padding_top": self._parse_padding_text(self.top_spin.currentText()),
+            "crop_padding_bottom": self._parse_padding_text(self.bottom_spin.currentText()),
+            "crop_padding_left": self._parse_padding_text(self.left_spin.currentText()),
+            "crop_padding_right": self._parse_padding_text(self.right_spin.currentText()),
             "crop_padding_fill": _safe_color(
                 str(self.fill_combo.currentData() or "#FFFFFF"), "#FFFFFF"
             ),

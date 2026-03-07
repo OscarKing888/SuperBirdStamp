@@ -11,6 +11,23 @@ _FALLBACK_STYLE_OPTIONS = ("normal",)
 _FALLBACK_RATIO_OPTIONS: list[tuple[str, float | None]] = [("原比例", None)]
 _FALLBACK_MAX_LONG_EDGE_OPTIONS = [0]
 _FALLBACK_OUTPUT_FORMAT_OPTIONS: list[tuple[str, str]] = [("png", "PNG"), ("jpg", "JPG")]
+_FALLBACK_VIDEO_CONTAINER_OPTIONS: list[tuple[str, str]] = [("mp4", "MP4"), ("mov", "MOV")]
+_FALLBACK_VIDEO_CODEC_OPTIONS: list[tuple[str, str]] = [("h264", "H.264 / libx264"), ("h265", "H.265 / libx265")]
+_FALLBACK_VIDEO_PRESET_OPTIONS: list[tuple[str, str]] = [("fast", "fast"), ("medium", "medium"), ("slow", "slow")]
+_FALLBACK_VIDEO_FRAME_SIZE_OPTIONS: list[dict[str, Any]] = [
+    {"label": "首帧尺寸", "mode": "auto", "width": 0, "height": 0},
+    {"label": "1920 x 1080", "mode": "preset", "width": 1920, "height": 1080},
+    {"label": "自定义", "mode": "custom", "width": 0, "height": 0},
+]
+_FALLBACK_VIDEO_FPS_OPTIONS = [12.0, 24.0, 25.0, 30.0, 60.0]
+_FALLBACK_DEFAULT_VIDEO_CONTAINER = "mp4"
+_FALLBACK_DEFAULT_VIDEO_CODEC = "h264"
+_FALLBACK_DEFAULT_VIDEO_PRESET = "medium"
+_FALLBACK_DEFAULT_VIDEO_FRAME_SIZE_MODE = "auto"
+_FALLBACK_DEFAULT_VIDEO_FPS = 25.0
+_FALLBACK_DEFAULT_VIDEO_CRF = 20
+_FALLBACK_DEFAULT_VIDEO_WIDTH = 1920
+_FALLBACK_DEFAULT_VIDEO_HEIGHT = 1080
 _FALLBACK_COLOR_PRESETS: list[tuple[str, str]] = [("白色", "#FFFFFF"), ("黑色", "#111111")]
 _FALLBACK_DEFAULT_FIELD_TAG = "EXIF:Model"
 _FALLBACK_TAG_OPTIONS: list[tuple[str, str]] = [("机身型号 (EXIF)", "EXIF:Model")]
@@ -79,9 +96,13 @@ def _normalize_max_edges(value: Any) -> list[int]:
     return items if items else list(_FALLBACK_MAX_LONG_EDGE_OPTIONS)
 
 
-def _normalize_output_formats(value: Any) -> list[tuple[str, str]]:
+def _normalize_output_formats(
+    value: Any,
+    fallback: list[tuple[str, str]] | None = None,
+) -> list[tuple[str, str]]:
+    fallback_items = list(fallback) if isinstance(fallback, list) else list(_FALLBACK_OUTPUT_FORMAT_OPTIONS)
     if not isinstance(value, list):
-        return list(_FALLBACK_OUTPUT_FORMAT_OPTIONS)
+        return fallback_items
     items: list[tuple[str, str]] = []
     for item in value:
         if not isinstance(item, dict):
@@ -91,7 +112,23 @@ def _normalize_output_formats(value: Any) -> list[tuple[str, str]]:
         if not suffix or not label:
             continue
         items.append((suffix, label))
-    return items if items else list(_FALLBACK_OUTPUT_FORMAT_OPTIONS)
+    return items if items else fallback_items
+
+
+def _normalize_numeric_list(value: Any, fallback: list[float]) -> list[float]:
+    if not isinstance(value, list):
+        return list(fallback)
+    items: list[float] = []
+    for item in value:
+        try:
+            parsed = float(item)
+        except Exception:
+            continue
+        if parsed <= 0:
+            continue
+        if parsed not in items:
+            items.append(parsed)
+    return items if items else list(fallback)
 
 
 def _normalize_labeled_values(value: Any, fallback: list[tuple[str, str]]) -> list[tuple[str, str]]:
@@ -107,6 +144,39 @@ def _normalize_labeled_values(value: Any, fallback: list[tuple[str, str]]) -> li
             continue
         items.append((label, item_value))
     return items if items else list(fallback)
+
+
+def _normalize_video_frame_size_options(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return [dict(item) for item in _FALLBACK_VIDEO_FRAME_SIZE_OPTIONS]
+
+    items: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or "").strip()
+        mode = str(item.get("mode") or "").strip().lower()
+        if not label or mode not in {"auto", "preset", "custom"}:
+            continue
+        width = 0
+        height = 0
+        if mode == "preset":
+            try:
+                width = int(item.get("width") or 0)
+                height = int(item.get("height") or 0)
+            except Exception:
+                continue
+            if width <= 0 or height <= 0:
+                continue
+        items.append(
+            {
+                "label": label,
+                "mode": mode,
+                "width": width,
+                "height": height,
+            }
+        )
+    return items if items else [dict(item) for item in _FALLBACK_VIDEO_FRAME_SIZE_OPTIONS]
 
 
 def _normalize_sample_raw_metadata(value: Any) -> dict[str, Any]:
@@ -129,7 +199,12 @@ def load_editor_options() -> dict[str, Any]:
     style_options = _normalize_style_options(raw.get("style_options"))
     ratio_options = _normalize_ratio_options(raw.get("ratio_options"))
     max_long_edge_options = _normalize_max_edges(raw.get("max_long_edge_options"))
-    output_format_options = _normalize_output_formats(raw.get("output_format_options"))
+    output_format_options = _normalize_output_formats(raw.get("output_format_options"), _FALLBACK_OUTPUT_FORMAT_OPTIONS)
+    video_container_options = _normalize_output_formats(raw.get("video_container_options"), _FALLBACK_VIDEO_CONTAINER_OPTIONS)
+    video_codec_options = _normalize_labeled_values(raw.get("video_codec_options"), _FALLBACK_VIDEO_CODEC_OPTIONS)
+    video_preset_options = _normalize_labeled_values(raw.get("video_preset_options"), _FALLBACK_VIDEO_PRESET_OPTIONS)
+    video_frame_size_options = _normalize_video_frame_size_options(raw.get("video_frame_size_options"))
+    video_fps_options = _normalize_numeric_list(raw.get("video_fps_options"), _FALLBACK_VIDEO_FPS_OPTIONS)
     color_presets = _normalize_labeled_values(raw.get("color_presets"), _FALLBACK_COLOR_PRESETS)
     tag_options = _normalize_labeled_values(raw.get("tag_options"), _FALLBACK_TAG_OPTIONS)
     sample_raw_metadata = _normalize_sample_raw_metadata(raw.get("sample_raw_metadata"))
@@ -139,11 +214,72 @@ def load_editor_options() -> dict[str, Any]:
     if default_field_tag not in tag_values:
         default_field_tag = tag_options[0][1] if tag_options else _FALLBACK_DEFAULT_FIELD_TAG
 
+    default_video_container = str(raw.get("default_video_container") or "").strip().lower() or _FALLBACK_DEFAULT_VIDEO_CONTAINER
+    container_values = {value for value, _label in video_container_options}
+    if default_video_container not in container_values:
+        default_video_container = video_container_options[0][0] if video_container_options else _FALLBACK_DEFAULT_VIDEO_CONTAINER
+
+    default_video_codec = str(raw.get("default_video_codec") or "").strip().lower() or _FALLBACK_DEFAULT_VIDEO_CODEC
+    codec_values = {value for value, _label in video_codec_options}
+    if default_video_codec not in codec_values:
+        default_video_codec = video_codec_options[0][0] if video_codec_options else _FALLBACK_DEFAULT_VIDEO_CODEC
+
+    default_video_preset = str(raw.get("default_video_preset") or "").strip().lower() or _FALLBACK_DEFAULT_VIDEO_PRESET
+    preset_values = {value for value, _label in video_preset_options}
+    if default_video_preset not in preset_values:
+        default_video_preset = video_preset_options[0][0] if video_preset_options else _FALLBACK_DEFAULT_VIDEO_PRESET
+
+    default_video_frame_size_mode = (
+        str(raw.get("default_video_frame_size_mode") or "").strip().lower() or _FALLBACK_DEFAULT_VIDEO_FRAME_SIZE_MODE
+    )
+    frame_modes = {str(item.get("mode") or "").strip().lower() for item in video_frame_size_options}
+    if default_video_frame_size_mode not in frame_modes:
+        default_video_frame_size_mode = _FALLBACK_DEFAULT_VIDEO_FRAME_SIZE_MODE
+
+    try:
+        default_video_fps = float(raw.get("default_video_fps", _FALLBACK_DEFAULT_VIDEO_FPS))
+    except Exception:
+        default_video_fps = _FALLBACK_DEFAULT_VIDEO_FPS
+    if default_video_fps <= 0:
+        default_video_fps = _FALLBACK_DEFAULT_VIDEO_FPS
+
+    try:
+        default_video_crf = int(raw.get("default_video_crf", _FALLBACK_DEFAULT_VIDEO_CRF))
+    except Exception:
+        default_video_crf = _FALLBACK_DEFAULT_VIDEO_CRF
+
+    try:
+        default_video_width = int(raw.get("default_video_width", _FALLBACK_DEFAULT_VIDEO_WIDTH))
+    except Exception:
+        default_video_width = _FALLBACK_DEFAULT_VIDEO_WIDTH
+    if default_video_width <= 0:
+        default_video_width = _FALLBACK_DEFAULT_VIDEO_WIDTH
+
+    try:
+        default_video_height = int(raw.get("default_video_height", _FALLBACK_DEFAULT_VIDEO_HEIGHT))
+    except Exception:
+        default_video_height = _FALLBACK_DEFAULT_VIDEO_HEIGHT
+    if default_video_height <= 0:
+        default_video_height = _FALLBACK_DEFAULT_VIDEO_HEIGHT
+
     return {
         "style_options": style_options,
         "ratio_options": ratio_options,
         "max_long_edge_options": max_long_edge_options,
         "output_format_options": output_format_options,
+        "video_container_options": video_container_options,
+        "video_codec_options": video_codec_options,
+        "video_preset_options": video_preset_options,
+        "video_frame_size_options": video_frame_size_options,
+        "video_fps_options": video_fps_options,
+        "default_video_container": default_video_container,
+        "default_video_codec": default_video_codec,
+        "default_video_preset": default_video_preset,
+        "default_video_frame_size_mode": default_video_frame_size_mode,
+        "default_video_fps": default_video_fps,
+        "default_video_crf": default_video_crf,
+        "default_video_width": default_video_width,
+        "default_video_height": default_video_height,
         "color_presets": color_presets,
         "default_field_tag": default_field_tag,
         "tag_options": tag_options,
@@ -156,6 +292,19 @@ STYLE_OPTIONS: tuple[str, ...] = _EDITOR_OPTIONS["style_options"]
 RATIO_OPTIONS: list[tuple[str, float | None]] = _EDITOR_OPTIONS["ratio_options"]
 MAX_LONG_EDGE_OPTIONS: list[int] = _EDITOR_OPTIONS["max_long_edge_options"]
 OUTPUT_FORMAT_OPTIONS: list[tuple[str, str]] = _EDITOR_OPTIONS["output_format_options"]
+VIDEO_CONTAINER_OPTIONS: list[tuple[str, str]] = _EDITOR_OPTIONS["video_container_options"]
+VIDEO_CODEC_OPTIONS: list[tuple[str, str]] = _EDITOR_OPTIONS["video_codec_options"]
+VIDEO_PRESET_OPTIONS: list[tuple[str, str]] = _EDITOR_OPTIONS["video_preset_options"]
+VIDEO_FRAME_SIZE_OPTIONS: list[dict[str, Any]] = _EDITOR_OPTIONS["video_frame_size_options"]
+VIDEO_FPS_OPTIONS: list[float] = _EDITOR_OPTIONS["video_fps_options"]
+DEFAULT_VIDEO_CONTAINER: str = _EDITOR_OPTIONS["default_video_container"]
+DEFAULT_VIDEO_CODEC: str = _EDITOR_OPTIONS["default_video_codec"]
+DEFAULT_VIDEO_PRESET: str = _EDITOR_OPTIONS["default_video_preset"]
+DEFAULT_VIDEO_FRAME_SIZE_MODE: str = _EDITOR_OPTIONS["default_video_frame_size_mode"]
+DEFAULT_VIDEO_FPS: float = _EDITOR_OPTIONS["default_video_fps"]
+DEFAULT_VIDEO_CRF: int = _EDITOR_OPTIONS["default_video_crf"]
+DEFAULT_VIDEO_WIDTH: int = _EDITOR_OPTIONS["default_video_width"]
+DEFAULT_VIDEO_HEIGHT: int = _EDITOR_OPTIONS["default_video_height"]
 COLOR_PRESETS: list[tuple[str, str]] = _EDITOR_OPTIONS["color_presets"]
 DEFAULT_FIELD_TAG: str = _EDITOR_OPTIONS["default_field_tag"]
 TAG_OPTIONS: list[tuple[str, str]] = _EDITOR_OPTIONS["tag_options"]

@@ -116,10 +116,23 @@ from birdstamp.gui.editor_photo_list import (
     PhotoListItem,
     PhotoListWidget,
 )
+from birdstamp.gui.editor_collapsible import CollapsibleSection
+from birdstamp.gui.editor_video_panel import VideoExportPanel, VideoExportRequest, VideoExportWorker
 from birdstamp.gui.editor_crop_calculator import _BirdStampCropMixin
 from birdstamp.gui.editor_renderer import _BirdStampRendererMixin
 from birdstamp.gui.editor_exporter import _BirdStampExporterMixin
-from app_common.report_db import ReportDB, resolve_existing_report_db_path
+from birdstamp.video_export import (
+    VideoExportOptions,
+    VideoFrameJob,
+    ffmpeg_install_script_path,
+    find_ffmpeg_executable,
+    preferred_ffmpeg_binary_path,
+)
+from app_common.report_db import (
+    ReportDB,
+    find_superpicky_report_db_paths,
+    resolve_existing_report_db_path,
+)
 
 # Re-export / aliases for refactored symbols (used below)
 ALIGN_OPTIONS_VERTICAL = editor_utils.ALIGN_OPTIONS_VERTICAL
@@ -317,6 +330,7 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         self.current_metadata_context: dict[str, str] = {}
         self.raw_metadata_cache: dict[str, dict[str, Any]] = {}
         self._pending_preview_fit_reset: bool = False
+        self._video_export_worker: VideoExportWorker | None = None
         # 占位图路径标记：非 None 时表示当前预览的是默认占位图而非用户照片
         self.placeholder_path: Path | None = None
 
@@ -460,6 +474,27 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
             self._add_report_db_paths(candidates)
         return max(0, len(self._report_db_entries) - existing_count)
 
+    def _auto_add_report_db_paths_for_received_files(self, paths: Iterable[Path]) -> int:
+        """根据 received 首个外部文件所在目录，向上最多 3 层补充发现 `.superpicky/report.db`。"""
+        existing_count = len(self._report_db_entries)
+        first_directory: Path | None = None
+        for incoming in paths:
+            try:
+                candidate = incoming if isinstance(incoming, Path) else Path(str(incoming))
+                candidate = candidate.resolve(strict=False)
+            except Exception:
+                continue
+            first_directory = candidate if candidate.is_dir() else candidate.parent
+            break
+
+        if first_directory is None:
+            return 0
+
+        candidates = [Path(db_path) for db_path in find_superpicky_report_db_paths(str(first_directory), max_levels=3)]
+        if candidates:
+            self._add_report_db_paths(candidates)
+        return max(0, len(self._report_db_entries) - existing_count)
+
     def _remove_selected_report_dbs(self) -> None:
         """从列表中移除选中的 report.db，并更新缓存。"""
         items = self.report_db_list.selectedItems()
@@ -497,10 +532,18 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         splitter = QSplitter(Qt.Orientation.Horizontal)
         root_layout.addWidget(splitter)
 
+        left_scroll = QScrollArea()
+        left_scroll.setObjectName("EditorLeftScrollArea")
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        left_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
         left_panel = QWidget()
+        left_panel.setObjectName("EditorLeftPanel")
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(8, 8, 8, 8)
-        left_layout.setSpacing(8)
+        left_layout.setSpacing(10)
 
         _window_icon_path, _info_bar_icon_path = _app_icon_paths()
         _app_icon = QIcon(str(_window_icon_path))
@@ -517,10 +560,12 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
 
         self._setup_ui_photos_list(left_layout)
         self._setup_ui_template_output_actions(left_layout)
+        left_layout.addStretch(1)
+        left_scroll.setWidget(left_panel)
 
         right_panel = self._setup_ui_preview_panel()
 
-        splitter.addWidget(left_panel)
+        splitter.addWidget(left_scroll)
         splitter.addWidget(right_panel)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
@@ -532,8 +577,9 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
     def _setup_ui_photos_list(self, left_layout: QVBoxLayout) -> None:
         """构建左侧「Report 数据库」+「照片列表」分组 UI。"""
         # ── Report 数据库列表 ────────────────────────────────────────────────
-        db_group = QGroupBox("Report 数据库")
-        db_layout = QVBoxLayout(db_group)
+        db_content = QWidget()
+        db_layout = QVBoxLayout(db_content)
+        db_layout.setContentsMargins(0, 0, 0, 0)
         db_layout.setSpacing(6)
 
         self.report_db_list = _ReportDBListWidget(self)
@@ -557,11 +603,14 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         db_hint.setStyleSheet("color: #7A7A7A; font-size: 11px;")
         db_layout.addWidget(db_hint)
 
-        left_layout.addWidget(db_group)
+        db_section = CollapsibleSection("Report 数据库", expanded=True)
+        db_section.set_content_widget(db_content)
+        left_layout.addWidget(db_section)
 
         # ── 照片列表 ────────────────────────────────────────────────────────
-        photos_group = QGroupBox("照片列表")
-        photos_layout = QVBoxLayout(photos_group)
+        photos_content = QWidget()
+        photos_layout = QVBoxLayout(photos_content)
+        photos_layout.setContentsMargins(0, 0, 0, 0)
         photos_layout.setSpacing(6)
 
         photo_btn_row = QHBoxLayout()
@@ -586,13 +635,16 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         self.photo_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.photo_list.pathsDropped.connect(self._add_photo_paths)
         self.photo_list.currentItemChanged.connect(self._on_photo_selected)
+        self.photo_list.setMinimumHeight(240)
         photos_layout.addWidget(self.photo_list, stretch=1)
 
         hint = QLabel("支持拖入单张照片或整个目录")
         hint.setStyleSheet("color: #7A7A7A;")
         photos_layout.addWidget(hint)
 
-        left_layout.addWidget(photos_group, stretch=2)
+        photos_section = CollapsibleSection("照片列表", expanded=True)
+        photos_section.set_content_widget(photos_content)
+        left_layout.addWidget(photos_section)
 
     # ------------------------------------------------------------------
     # ReportDB 列表与缓存
@@ -618,9 +670,15 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
 
     def _setup_ui_template_output_actions(self, left_layout: QVBoxLayout) -> None:
         """构建左侧「模板」「模板选项重载」「操作」分组 UI。"""
+        template_section_content = QWidget()
+        template_section_layout = QVBoxLayout(template_section_content)
+        template_section_layout.setContentsMargins(0, 0, 0, 0)
+        template_section_layout.setSpacing(10)
+
         # ── 模板 ─────────────────────────────────────────────────────────────
-        template_group = QGroupBox("模板")
-        template_layout = QHBoxLayout(template_group)
+        template_content = QWidget()
+        template_layout = QHBoxLayout(template_content)
+        template_layout.setContentsMargins(0, 0, 0, 0)
 
         self.template_combo = QComboBox()
         self.template_combo.currentTextChanged.connect(self._on_template_changed)
@@ -629,11 +687,11 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         manage_template_btn = QPushButton("模板管理")
         manage_template_btn.clicked.connect(self._open_template_manager)
         template_layout.addWidget(manage_template_btn)
-        left_layout.addWidget(template_group)
+        template_section_layout.addWidget(template_content)
 
         # ── 模板选项重载（可滚动） ─────────────────────────────────────────
-        override_group = QGroupBox("模板选项重载")
-        override_form = QFormLayout(override_group)
+        override_content = QWidget()
+        override_form = QFormLayout(override_content)
         _configure_form_layout(override_form)
 
         self.ratio_combo = QComboBox()
@@ -688,18 +746,16 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         override_btn_row.addWidget(self.apply_all_btn)
         override_form.addRow("", override_btn_row)
 
-        override_scroll = QScrollArea()
-        override_scroll.setWidget(override_group)
-        override_scroll.setWidgetResizable(True)
-        override_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        override_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        override_scroll.setMinimumHeight(180)
-        override_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        left_layout.addWidget(override_scroll)
+        template_section_layout.addWidget(override_content)
+
+        template_section = CollapsibleSection("模板与重载", expanded=True)
+        template_section.set_content_widget(template_section_content)
+        left_layout.addWidget(template_section)
 
         # ── 全局选项 + 操作（合并一组） ────────────────────────────────────
-        actions_group = QGroupBox("操作")
-        actions_root = QVBoxLayout(actions_group)
+        actions_content = QWidget()
+        actions_root = QVBoxLayout(actions_content)
+        actions_root.setContentsMargins(0, 0, 0, 0)
         actions_root.setSpacing(6)
 
         global_form = QFormLayout()
@@ -759,8 +815,25 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         export_btn_row.addWidget(export_batch_btn)
         actions_root.addLayout(export_btn_row)
 
-        left_layout.addWidget(actions_group)
-        left_layout.addStretch(1)
+        self.video_export_panel = VideoExportPanel()
+        self.video_export_panel.exportRequested.connect(self._start_video_export)
+        self.video_export_panel.cancelRequested.connect(self._cancel_video_export)
+        ffmpeg_path = find_ffmpeg_executable()
+        if ffmpeg_path is not None:
+            self.video_export_panel.set_status_text(f"ffmpeg: {ffmpeg_path}")
+        else:
+            install_script = ffmpeg_install_script_path()
+            if install_script is not None:
+                self.video_export_panel.set_status_text(
+                    f"未找到 ffmpeg，可运行: {install_script}，目标: {preferred_ffmpeg_binary_path()}"
+                )
+            else:
+                self.video_export_panel.set_status_text(f"未找到 ffmpeg，目标: {preferred_ffmpeg_binary_path()}")
+        actions_root.addWidget(self.video_export_panel)
+
+        actions_section = CollapsibleSection("操作", expanded=True)
+        actions_section.set_content_widget(actions_content)
+        left_layout.addWidget(actions_section)
 
     def _setup_ui_preview_panel(self) -> QWidget:
         """构建右侧「预览区」UI，返回该面板 QWidget。"""
@@ -866,6 +939,33 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
                 padding: 0 4px;
                 font-weight: 600;
             }}
+            QScrollArea#EditorLeftScrollArea {{
+                background: transparent;
+                border: none;
+            }}
+            QWidget#EditorLeftPanel {{
+                background: transparent;
+            }}
+            QToolButton#CollapsibleHeaderButton {{
+                text-align: left;
+                font-weight: 600;
+                border: 1px solid {border_color.name()};
+                border-radius: 10px;
+                background: {base_color.name()};
+                color: {text_color.name()};
+                padding: 7px 10px;
+            }}
+            QToolButton#CollapsibleHeaderButton:hover {{
+                background: {hover_color.name()};
+            }}
+            QFrame#CollapsibleContentFrame {{
+                border: 1px solid {border_color.name()};
+                border-top: none;
+                border-bottom-left-radius: 10px;
+                border-bottom-right-radius: 10px;
+                background: {base_color.name()};
+                padding: 8px;
+            }}
             QLineEdit {{
                 border: 1px solid {border_color.name()};
                 border-radius: 7px;
@@ -948,6 +1048,14 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         if event.type() in {QEvent.Type.PaletteChange, QEvent.Type.ApplicationPaletteChange}:
             self._apply_system_adaptive_style()
         super().changeEvent(event)
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        active_worker = self._video_export_worker
+        if active_worker is not None and active_worker.isRunning():
+            QMessageBox.information(self, "视频导出进行中", "请先中断当前视频导出，或等待导出完成后再关闭窗口。")
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     def _on_preview_toolbar_toggled(self, _checked: bool) -> None:
         self._refresh_preview_label(preserve_view=True)
@@ -1478,6 +1586,7 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         paths: Iterable[Path],
         *,
         select_last_added: bool = False,
+        pre_added_report_db_count: int = 0,
     ) -> None:
         valid_paths: list[Path] = []
         for incoming in paths:
@@ -1491,6 +1600,7 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
             valid_paths.append(path)
 
         auto_added_report_db_count = self._auto_add_report_db_paths_for_photos(valid_paths)
+        total_auto_added_report_db_count = max(0, int(pre_added_report_db_count)) + auto_added_report_db_count
 
         existing_keys = {_path_key(path) for path in self._list_photo_paths()}
         default_settings = self._build_current_render_settings()
@@ -1520,7 +1630,7 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
             add_count += 1
             last_added_item = item
 
-        if add_count == 0 and auto_added_report_db_count == 0:
+        if add_count == 0 and total_auto_added_report_db_count == 0:
             self._set_status("没有新增照片。")
             return
 
@@ -1533,13 +1643,23 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
 
         self.photo_list.refresh_row_numbers()
 
-        if add_count > 0 and auto_added_report_db_count > 0:
-            self._set_status(f"已添加 {add_count} 张照片，并自动添加 {auto_added_report_db_count} 个 report.db。")
+        if add_count > 0 and total_auto_added_report_db_count > 0:
+            self._set_status(f"已添加 {add_count} 张照片，并自动添加 {total_auto_added_report_db_count} 个 report.db。")
             return
         if add_count > 0:
             self._set_status(f"已添加 {add_count} 张照片。")
             return
-        self._set_status(f"没有新增照片，已自动添加 {auto_added_report_db_count} 个 report.db。")
+        self._set_status(f"没有新增照片，已自动添加 {total_auto_added_report_db_count} 个 report.db。")
+
+    def _add_received_photo_paths(self, paths: Iterable[Path]) -> None:
+        """处理外部 received 文件：先补充 report.db，再沿用现有加图逻辑。"""
+        pending_paths = list(paths)
+        pre_added_report_db_count = self._auto_add_report_db_paths_for_received_files(pending_paths)
+        self._add_photo_paths(
+            pending_paths,
+            select_last_added=True,
+            pre_added_report_db_count=pre_added_report_db_count,
+        )
 
     def add_received_file_paths(self, paths: Iterable[str | Path]) -> None:
         """
@@ -1557,9 +1677,7 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         path_objs = [Path(path_text) for path_text in normalized_paths]
         QTimer.singleShot(
             0,
-            lambda pending_paths=path_objs: self._add_photo_paths(
-                pending_paths, select_last_added=True
-            ),
+            lambda pending_paths=path_objs: self._add_received_photo_paths(pending_paths),
         )
 
     def _remove_selected_photos(self) -> None:
@@ -1683,6 +1801,159 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
 
         self.raw_metadata_cache[key] = raw_metadata
         return raw_metadata
+
+    def _suggest_video_output_path(self, container: str) -> Path:
+        suffix = str(container or "mp4").strip().lower().lstrip(".") or "mp4"
+        paths = self._list_photo_paths()
+        if paths:
+            first_path = paths[0]
+            base_dir = first_path.parent
+            stem = f"{first_path.stem}__birdstamp_video_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            return base_dir / f"{stem}.{suffix}"
+        return Path.cwd() / f"birdstamp_video_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{suffix}"
+
+    def _build_video_export_jobs(self, paths: list[Path]) -> list[VideoFrameJob]:
+        jobs: list[VideoFrameJob] = []
+        current_key = _path_key(self.current_path) if self.current_path is not None else ""
+        current_render_settings = self._build_current_render_settings()
+        export_draw_banner = _parse_bool_value(current_render_settings.get("draw_banner"), True)
+        export_draw_text = _parse_bool_value(current_render_settings.get("draw_text"), True)
+        for path in paths:
+            raw_metadata = dict(self._load_raw_metadata(path))
+            photo_info = self._photo_info_for_display(path, raw_metadata=raw_metadata)
+            metadata_context = _build_metadata_context(photo_info, raw_metadata)
+            settings = self._clone_render_settings(self._render_settings_for_path(path, prefer_current_ui=False))
+            # 视频导出时，叠加信息的两个总开关跟随当前界面状态，
+            # 但仍保留每张照片各自的模板/裁切重载。
+            settings["draw_banner"] = export_draw_banner
+            settings["draw_text"] = export_draw_text
+
+            source_image = None
+            if self.current_source_image is not None and current_key and _path_key(path) == current_key:
+                source_image = self.current_source_image.copy()
+
+            jobs.append(
+                VideoFrameJob(
+                    path=path,
+                    settings=settings,
+                    raw_metadata=raw_metadata,
+                    metadata_context=metadata_context,
+                    photo_info=photo_info,
+                    source_image=source_image,
+                )
+            )
+        return jobs
+
+    def _cleanup_video_export_worker(self) -> None:
+        self._video_export_worker = None
+
+    def _on_video_export_progress(self, text: str) -> None:
+        message = str(text or "").strip()
+        if not message:
+            return
+        self.video_export_panel.set_status_text(message)
+        self._set_status(message)
+
+    def _on_video_export_succeeded(self, output_path_text: str) -> None:
+        output_path = Path(output_path_text)
+        self.video_export_panel.set_busy(False, status_text=f"视频导出完成: {output_path}")
+        self._set_status(f"视频导出完成: {output_path}")
+        self._cleanup_video_export_worker()
+
+    def _on_video_export_cancelled(self, message: str) -> None:
+        cancel_text = str(message or "").strip() or "视频导出已中断。"
+        self.video_export_panel.set_busy(False, status_text=cancel_text)
+        self._set_status(cancel_text)
+        self._cleanup_video_export_worker()
+        QMessageBox.information(self, "视频导出已中断", cancel_text)
+
+    def _on_video_export_failed(self, message: str) -> None:
+        error_text = str(message or "").strip() or "未知错误"
+        self.video_export_panel.set_busy(False, status_text=f"视频导出失败: {error_text}")
+        self._set_status(f"视频导出失败: {error_text}")
+        self._cleanup_video_export_worker()
+        self._show_error("视频导出失败", error_text)
+
+    def _cancel_video_export(self) -> None:
+        worker = self._video_export_worker
+        if worker is None or not worker.isRunning():
+            self.video_export_panel.set_busy(False)
+            self._cleanup_video_export_worker()
+            return
+        worker.cancel()
+        message = "正在中断视频导出，并保留已完成帧..."
+        self.video_export_panel.set_status_text(message)
+        self._set_status(message)
+
+    def _start_video_export(self, request: VideoExportRequest) -> None:
+        if self._video_export_worker is not None and self._video_export_worker.isRunning():
+            self._set_status("已有视频导出任务在运行。")
+            return
+
+        paths = self._list_photo_paths()
+        if not paths:
+            self._set_status("照片列表为空。")
+            return
+
+        if find_ffmpeg_executable() is None:
+            install_script = ffmpeg_install_script_path()
+            if install_script is not None:
+                self._show_error(
+                    "未找到 ffmpeg",
+                    f"请先运行安装脚本:\n{install_script}\n\n安装目标:\n{preferred_ffmpeg_binary_path()}",
+                )
+            else:
+                self._show_error(
+                    "未找到 ffmpeg",
+                    f"请先安装 ffmpeg，或放到以下位置后再试：\n{preferred_ffmpeg_binary_path()}",
+                )
+            return
+
+        default_path = self._suggest_video_output_path(request.container)
+        selected_filter = "MP4 视频 (*.mp4)" if str(request.container).lower() == "mp4" else "MOV 视频 (*.mov)"
+        file_path, _selected = QFileDialog.getSaveFileName(
+            self,
+            "导出视频",
+            str(default_path),
+            "MP4 视频 (*.mp4);;MOV 视频 (*.mov);;All Files (*.*)",
+            selected_filter,
+        )
+        if not file_path:
+            return
+
+        try:
+            options = VideoExportOptions(
+                output_path=Path(file_path),
+                container=request.container,
+                codec=request.codec,
+                fps=request.fps,
+                preset=request.preset,
+                crf=request.crf,
+                frame_size_mode=request.frame_size_mode,
+                frame_width=request.frame_width,
+                frame_height=request.frame_height,
+            )
+            jobs = self._build_video_export_jobs(paths)
+        except Exception as exc:
+            self._show_error("视频导出参数无效", str(exc))
+            return
+
+        worker = VideoExportWorker(
+            jobs=jobs,
+            options=options,
+            template_paths=dict(self.template_paths),
+            parent=self,
+        )
+        worker.progressTextChanged.connect(self._on_video_export_progress)
+        worker.exportSucceeded.connect(self._on_video_export_succeeded)
+        worker.exportCancelled.connect(self._on_video_export_cancelled)
+        worker.exportFailed.connect(self._on_video_export_failed)
+        worker.finished.connect(worker.deleteLater)
+        self._video_export_worker = worker
+
+        self.video_export_panel.set_busy(True, status_text=f"准备生成视频，共 {len(jobs)} 帧。")
+        self._set_status(f"准备生成视频，共 {len(jobs)} 帧。")
+        worker.start()
 
 
 
