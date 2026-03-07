@@ -528,6 +528,35 @@ def normalized_box_to_pixel_box(
     return (left, top, right, bottom)
 
 
+def compute_crop_output_size(
+    source_width: int,
+    source_height: int,
+    crop_box: tuple[float, float, float, float] | None,
+    outer_pad: tuple[int, int, int, int] = (0, 0, 0, 0),
+) -> tuple[int, int] | None:
+    """Return crop output size in pixels after applying outer pad and crop box."""
+    if source_width <= 0 or source_height <= 0:
+        return None
+    top, bottom, left, right = outer_pad
+    padded_width = source_width + max(0, int(left)) + max(0, int(right))
+    padded_height = source_height + max(0, int(top)) + max(0, int(bottom))
+    if padded_width <= 0 or padded_height <= 0:
+        return None
+    crop_px = normalized_box_to_pixel_box(
+        crop_box,
+        padded_width,
+        padded_height,
+        fallback_full=True,
+    )
+    if crop_px is None:
+        return None
+    crop_left, crop_top, crop_right, crop_bottom = crop_px
+    return (
+        max(1, crop_right - crop_left),
+        max(1, crop_bottom - crop_top),
+    )
+
+
 def transform_source_box_after_crop_padding(
     source_box: tuple[float, float, float, float] | None,
     *,

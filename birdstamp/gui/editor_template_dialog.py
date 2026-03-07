@@ -91,6 +91,7 @@ _parse_bool_value = editor_core.parse_bool_value
 _parse_ratio_value = editor_core.parse_ratio_value
 _parse_padding_value = editor_core.parse_padding_value
 _compute_crop_plan = editor_core.compute_crop_plan
+_compute_crop_output_size = editor_core.compute_crop_output_size
 _extract_focus_box_for_display = editor_core.extract_focus_box_for_display
 _resolve_focus_camera_type_from_metadata = editor_core.resolve_focus_camera_type_from_metadata
 _transform_source_box_after_crop_padding = editor_core.transform_source_box_after_crop_padding
@@ -2151,6 +2152,12 @@ class TemplateManagerDialog(QDialog):
             bird_box=preview_bird_box,
             crop_effect_box=crop_box,
         )
+        self._preview_crop_size = _compute_crop_output_size(
+            source_width,
+            source_height,
+            crop_box,
+            outer_pad,
+        )
         self.preview_pixmap = _pil_to_qpixmap(image)
         self._refresh_preview_label()
 
@@ -2160,6 +2167,7 @@ class TemplateManagerDialog(QDialog):
         if self.preview_pixmap is None or self.preview_pixmap.isNull():
             self.preview_label.apply_overlay_state(EditorPreviewOverlayState())
             self.preview_label.set_original_size(None, None)
+            self.preview_label.set_cropped_size(None, None)
             self.preview_label.set_source_mode("")
             self.preview_label.set_source_pixmap(None)
             return
@@ -2169,5 +2177,10 @@ class TemplateManagerDialog(QDialog):
             self.preview_label.set_original_size(w, h)
         else:
             self.preview_label.set_original_size(None, None)
+        crop_size = getattr(self, "_preview_crop_size", None)
+        if crop_size is not None:
+            self.preview_label.set_cropped_size(crop_size[0], crop_size[1])
+        else:
+            self.preview_label.set_cropped_size(None, None)
         self.preview_label.set_source_mode("原图")
         self.preview_label.set_source_pixmap(self.preview_pixmap, preserve_view=True)

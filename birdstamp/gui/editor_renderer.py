@@ -36,6 +36,7 @@ _pad_image                          = editor_core.pad_image
 _resize_fit                         = editor_core.resize_fit
 _crop_image_by_normalized_box       = editor_core.crop_image_by_normalized_box
 _crop_box_has_effect                = editor_core.crop_box_has_effect
+_compute_crop_output_size           = editor_core.compute_crop_output_size
 _normalized_box_to_pixel_box        = editor_core.normalized_box_to_pixel_box
 _normalize_template_payload         = editor_template.normalize_template_payload
 _deep_copy_payload                  = editor_template.deep_copy_payload
@@ -271,6 +272,7 @@ class _BirdStampRendererMixin:
         self.current_source_image = None
         self.current_raw_metadata = {}
         self.current_metadata_context = {}
+        self._preview_crop_size: tuple[int, int] | None = None
         self.preview_pixmap = _pil_to_qpixmap(self.placeholder)
         self.preview_overlay_state = EditorPreviewOverlayState()
         self._invalidate_original_mode_cache()
@@ -295,6 +297,11 @@ class _BirdStampRendererMixin:
             self.preview_label.set_original_size(self.current_source_image.size[0], self.current_source_image.size[1])
         else:
             self.preview_label.set_original_size(None, None)
+        crop_size = getattr(self, "_preview_crop_size", None)
+        if crop_size is not None:
+            self.preview_label.set_cropped_size(crop_size[0], crop_size[1])
+        else:
+            self.preview_label.set_cropped_size(None, None)
         self.preview_label.set_source_mode(source_mode)
         self.preview_label.set_source_pixmap(
             display_pixmap,
@@ -737,12 +744,19 @@ class _BirdStampRendererMixin:
                 apply_ratio_crop=False,
             )
         except Exception as exc:
+            self._preview_crop_size = None
             self.preview_overlay_state = EditorPreviewOverlayState()
             self._show_error("预览失败", str(exc))
             self._set_status(f"预览失败: {exc}")
             return
 
         self.last_rendered = rendered
+        self._preview_crop_size = _compute_crop_output_size(
+            self.current_source_image.width,
+            self.current_source_image.height,
+            crop_box,
+            outer_pad,
+        )
         pad_top, pad_bottom, pad_left, pad_right = outer_pad
         focus_camera_type = _resolve_focus_camera_type_from_metadata(raw_metadata)
         # 注意：预览图是经过 EXIF Orientation 纠正后的显示坐标，不能直接用当前图像尺寸调用
