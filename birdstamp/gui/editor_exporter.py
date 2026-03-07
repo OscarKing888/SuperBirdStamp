@@ -32,10 +32,13 @@ class _BirdStampExporterMixin:
 
         suffix = self._selected_output_suffix()
         default_name = f"{self.current_path.stem}__birdstamp.{suffix}"
+        remembered_dir = getattr(self, "_image_export_last_output_dir", None)
+        fallback_dir = remembered_dir if isinstance(remembered_dir, Path) and remembered_dir.is_dir() else self.current_path.parent
+        default_path = fallback_dir / default_name
         file_path, _ = QFileDialog.getSaveFileName(
             self,
             "导出当前照片",
-            default_name,
+            str(default_path),
             "PNG (*.png);;JPG (*.jpg);;All Files (*.*)",
         )
         if not file_path:
@@ -51,6 +54,9 @@ class _BirdStampExporterMixin:
             self._show_error("导出失败", str(exc))
             return
 
+        remembered_target_dir = target.parent.resolve(strict=False)
+        self._image_export_last_output_dir = remembered_target_dir
+        self._save_image_export_last_output_dir(remembered_target_dir)
         self._set_status(f"导出完成: {target}")
 
     def export_all(self) -> None:
@@ -59,13 +65,25 @@ class _BirdStampExporterMixin:
             self._set_status("照片列表为空。")
             return
 
-        output_dir = QFileDialog.getExistingDirectory(self, "选择批量导出目录", "")
+        remembered_dir = getattr(self, "_batch_export_last_output_dir", None)
+        if not isinstance(remembered_dir, Path) or not remembered_dir.is_dir():
+            remembered_dir = getattr(self, "_image_export_last_output_dir", None)
+        if not isinstance(remembered_dir, Path) or not remembered_dir.is_dir():
+            remembered_dir = paths[0].parent if paths else None
+        output_dir = QFileDialog.getExistingDirectory(
+            self,
+            "选择批量导出目录",
+            str(remembered_dir) if isinstance(remembered_dir, Path) else "",
+        )
         if not output_dir:
             return
 
         suffix = self._selected_output_suffix()
         out_dir = Path(output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
+        remembered_output_dir = out_dir.resolve(strict=False)
+        self._batch_export_last_output_dir = remembered_output_dir
+        self._save_batch_export_last_output_dir(remembered_output_dir)
 
         stem_counter: dict[str, int] = {}
         ok_count = 0

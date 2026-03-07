@@ -118,12 +118,12 @@ fi
 echo ""
 echo "Creating zip: $ZIP_FILE ..."
 # ditto preserves resource forks and symlinks inside .app bundles
-if command -v ditto &>/dev/null; then
-    ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$ZIP_FILE"
-else
-    (cd dist && zip -ry "$(basename "$ZIP_FILE")" "$(basename "$APP_DIR")")
-fi
-echo "Zip created: $ZIP_FILE"
+#if command -v ditto &>/dev/null; then
+#    ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$ZIP_FILE"
+#else
+#    (cd dist && zip -ry "$(basename "$ZIP_FILE")" "$(basename "$APP_DIR")")
+#fi
+#echo "Zip created: $ZIP_FILE"
 
 echo ""
 echo "Done."

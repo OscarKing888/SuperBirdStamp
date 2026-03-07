@@ -331,6 +331,8 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         self.raw_metadata_cache: dict[str, dict[str, Any]] = {}
         self._pending_preview_fit_reset: bool = False
         self._video_export_worker: VideoExportWorker | None = None
+        self._image_export_last_output_dir: Path | None = self._load_image_export_last_output_dir()
+        self._batch_export_last_output_dir: Path | None = self._load_batch_export_last_output_dir()
         self._video_export_last_output_dir: Path | None = self._load_video_export_last_output_dir()
         # 占位图路径标记：非 None 时表示当前预览的是默认占位图而非用户照片
         self.placeholder_path: Path | None = None
@@ -1027,19 +1029,42 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
     def _show_error(self, title: str, message: str) -> None:
         QMessageBox.critical(self, title, message)
 
-    def _video_export_state_path(self) -> Path:
+    def _editor_export_state_path(self) -> Path:
+        return get_config_path().parent / "editor_export_state.json"
+
+    def _legacy_video_export_state_path(self) -> Path:
         return get_config_path().parent / "editor_video_export_state.json"
 
-    def _load_video_export_last_output_dir(self) -> Path | None:
-        state_path = self._video_export_state_path()
+    def _load_editor_export_state_raw(self) -> dict[str, Any]:
+        state_path = self._editor_export_state_path()
         try:
             text = state_path.read_text(encoding="utf-8")
             raw = json.loads(text)
         except Exception:
-            return None
+            raw = None
+        if isinstance(raw, dict):
+            return raw
+
+        legacy_path = self._legacy_video_export_state_path()
+        try:
+            legacy_text = legacy_path.read_text(encoding="utf-8")
+            legacy_raw = json.loads(legacy_text)
+        except Exception:
+            return {}
+        if not isinstance(legacy_raw, dict):
+            return {}
+        last_output_dir = str(legacy_raw.get("last_output_dir") or "").strip()
+        if not last_output_dir:
+            return {}
+        return {
+            "last_video_output_dir": last_output_dir,
+        }
+
+    def _load_remembered_output_dir(self, key: str) -> Path | None:
+        raw = self._load_editor_export_state_raw()
         if not isinstance(raw, dict):
             return None
-        dir_text = str(raw.get("last_output_dir") or "").strip()
+        dir_text = str(raw.get(key) or "").strip()
         if not dir_text:
             return None
         try:
@@ -1048,20 +1073,37 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
             return None
         return path if path.is_dir() else None
 
-    def _save_video_export_last_output_dir(self, directory: Path) -> None:
+    def _save_remembered_output_dir(self, key: str, directory: Path) -> None:
         try:
             target_dir = directory.expanduser().resolve(strict=False)
         except Exception:
             target_dir = Path(directory)
-        state_path = self._video_export_state_path()
-        payload = {
-            "last_output_dir": str(target_dir),
-        }
+        state_path = self._editor_export_state_path()
+        payload = self._load_editor_export_state_raw()
+        payload[key] = str(target_dir)
         try:
             state_path.parent.mkdir(parents=True, exist_ok=True)
             state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception as exc:
-            _log.warning("save video export state failed: %s", exc)
+            _log.warning("save export state failed: key=%s err=%s", key, exc)
+
+    def _load_video_export_last_output_dir(self) -> Path | None:
+        return self._load_remembered_output_dir("last_video_output_dir")
+
+    def _save_video_export_last_output_dir(self, directory: Path) -> None:
+        self._save_remembered_output_dir("last_video_output_dir", directory)
+
+    def _load_image_export_last_output_dir(self) -> Path | None:
+        return self._load_remembered_output_dir("last_image_output_dir")
+
+    def _save_image_export_last_output_dir(self, directory: Path) -> None:
+        self._save_remembered_output_dir("last_image_output_dir", directory)
+
+    def _load_batch_export_last_output_dir(self) -> Path | None:
+        return self._load_remembered_output_dir("last_batch_output_dir")
+
+    def _save_batch_export_last_output_dir(self, directory: Path) -> None:
+        self._save_remembered_output_dir("last_batch_output_dir", directory)
 
     def _confirm_video_output_overwrite(self, output_path: Path) -> bool:
         if not output_path.exists():
