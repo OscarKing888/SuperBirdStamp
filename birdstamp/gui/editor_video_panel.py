@@ -23,11 +23,13 @@ from birdstamp.video_export import VideoExportCancelledError, VideoExportOptions
 VIDEO_CONTAINER_OPTIONS = editor_options.VIDEO_CONTAINER_OPTIONS
 VIDEO_CODEC_OPTIONS = editor_options.VIDEO_CODEC_OPTIONS
 VIDEO_PRESET_OPTIONS = editor_options.VIDEO_PRESET_OPTIONS
+VIDEO_ORIENTATION_OPTIONS = editor_options.VIDEO_ORIENTATION_OPTIONS
 VIDEO_FRAME_SIZE_OPTIONS = editor_options.VIDEO_FRAME_SIZE_OPTIONS
 VIDEO_FPS_OPTIONS = editor_options.VIDEO_FPS_OPTIONS
 DEFAULT_VIDEO_CONTAINER = editor_options.DEFAULT_VIDEO_CONTAINER
 DEFAULT_VIDEO_CODEC = editor_options.DEFAULT_VIDEO_CODEC
 DEFAULT_VIDEO_PRESET = editor_options.DEFAULT_VIDEO_PRESET
+DEFAULT_VIDEO_ORIENTATION = editor_options.DEFAULT_VIDEO_ORIENTATION
 DEFAULT_VIDEO_FRAME_SIZE_MODE = editor_options.DEFAULT_VIDEO_FRAME_SIZE_MODE
 DEFAULT_VIDEO_FPS = editor_options.DEFAULT_VIDEO_FPS
 DEFAULT_VIDEO_CRF = editor_options.DEFAULT_VIDEO_CRF
@@ -108,6 +110,14 @@ class VideoExportPanel(QGroupBox):
         self.frame_size_combo.currentIndexChanged.connect(self._sync_frame_size_state)
         form.addRow("尺寸", self.frame_size_combo)
 
+        self.orientation_combo = QComboBox()
+        for label, value in VIDEO_ORIENTATION_OPTIONS:
+            self.orientation_combo.addItem(label, value)
+        orientation_index = self.orientation_combo.findData(DEFAULT_VIDEO_ORIENTATION)
+        self.orientation_combo.setCurrentIndex(max(0, orientation_index))
+        self.orientation_combo.currentIndexChanged.connect(self._sync_frame_size_state)
+        form.addRow("方向", self.orientation_combo)
+
         custom_size_widget = QWidget()
         custom_size_layout = QHBoxLayout(custom_size_widget)
         custom_size_layout.setContentsMargins(0, 0, 0, 0)
@@ -182,10 +192,10 @@ class VideoExportPanel(QGroupBox):
     def _sync_frame_size_state(self) -> None:
         data = self.current_frame_size_data()
         mode = str(data.get("mode") or "auto").strip().lower()
-        width = int(data.get("width") or 0)
-        height = int(data.get("height") or 0)
+        width, height = self._resolved_preset_size(data)
 
         is_custom = mode == "custom"
+        self.orientation_combo.setEnabled(mode == "preset")
         self.frame_width_spin.setEnabled(is_custom)
         self.frame_height_spin.setEnabled(is_custom)
 
@@ -196,6 +206,25 @@ class VideoExportPanel(QGroupBox):
     def current_frame_size_data(self) -> dict[str, int | str]:
         data = self.frame_size_combo.currentData()
         return data if isinstance(data, dict) else {"mode": "auto", "width": 0, "height": 0}
+
+    def current_orientation(self) -> str:
+        return str(self.orientation_combo.currentData() or DEFAULT_VIDEO_ORIENTATION).strip().lower() or DEFAULT_VIDEO_ORIENTATION
+
+    def _resolved_preset_size(self, data: dict[str, int | str] | None = None) -> tuple[int, int]:
+        frame_data = data if isinstance(data, dict) else self.current_frame_size_data()
+        width = int(frame_data.get("width") or 0)
+        height = int(frame_data.get("height") or 0)
+        if width <= 0 or height <= 0:
+            return (width, height)
+
+        orientation = self.current_orientation()
+        long_edge = max(width, height)
+        short_edge = min(width, height)
+        if orientation == "portrait" and long_edge != short_edge:
+            return (short_edge, long_edge)
+        if orientation == "landscape" and long_edge != short_edge:
+            return (long_edge, short_edge)
+        return (width, height)
 
     def current_request(self) -> VideoExportRequest:
         fps_text = str(self.fps_combo.currentText() or "").strip()
@@ -208,8 +237,7 @@ class VideoExportPanel(QGroupBox):
         width = self.frame_width_spin.value()
         height = self.frame_height_spin.value()
         if mode == "preset":
-            width = int(frame_data.get("width") or width)
-            height = int(frame_data.get("height") or height)
+            width, height = self._resolved_preset_size(frame_data)
         elif mode == "auto":
             width = 0
             height = 0
@@ -231,6 +259,7 @@ class VideoExportPanel(QGroupBox):
         self.codec_combo.setEnabled(not busy)
         self.fps_combo.setEnabled(not busy)
         self.frame_size_combo.setEnabled(not busy)
+        self.orientation_combo.setEnabled(not busy and str(self.current_frame_size_data().get("mode") or "") == "preset")
         self.frame_width_spin.setEnabled(not busy and str(self.current_frame_size_data().get("mode") or "") == "custom")
         self.frame_height_spin.setEnabled(not busy and str(self.current_frame_size_data().get("mode") or "") == "custom")
         self.preset_combo.setEnabled(not busy)

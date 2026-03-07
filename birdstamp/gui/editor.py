@@ -331,6 +331,7 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         self.raw_metadata_cache: dict[str, dict[str, Any]] = {}
         self._pending_preview_fit_reset: bool = False
         self._video_export_worker: VideoExportWorker | None = None
+        self._video_export_last_output_dir: Path | None = self._load_video_export_last_output_dir()
         # 占位图路径标记：非 None 时表示当前预览的是默认占位图而非用户照片
         self.placeholder_path: Path | None = None
 
@@ -1021,6 +1022,54 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
 
     def _show_error(self, title: str, message: str) -> None:
         QMessageBox.critical(self, title, message)
+
+    def _video_export_state_path(self) -> Path:
+        return get_config_path().parent / "editor_video_export_state.json"
+
+    def _load_video_export_last_output_dir(self) -> Path | None:
+        state_path = self._video_export_state_path()
+        try:
+            text = state_path.read_text(encoding="utf-8")
+            raw = json.loads(text)
+        except Exception:
+            return None
+        if not isinstance(raw, dict):
+            return None
+        dir_text = str(raw.get("last_output_dir") or "").strip()
+        if not dir_text:
+            return None
+        try:
+            path = Path(dir_text).expanduser().resolve(strict=False)
+        except Exception:
+            return None
+        return path if path.is_dir() else None
+
+    def _save_video_export_last_output_dir(self, directory: Path) -> None:
+        try:
+            target_dir = directory.expanduser().resolve(strict=False)
+        except Exception:
+            target_dir = Path(directory)
+        state_path = self._video_export_state_path()
+        payload = {
+            "last_output_dir": str(target_dir),
+        }
+        try:
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as exc:
+            _log.warning("save video export state failed: %s", exc)
+
+    def _confirm_video_output_overwrite(self, output_path: Path) -> bool:
+        if not output_path.exists():
+            return True
+        answer = QMessageBox.question(
+            self,
+            "输出文件已存在",
+            f"目标文件已存在，是否覆盖？\n\n{output_path}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
 
     def _show_about_dialog(self) -> None:
         override_path = get_config_path().parent / "about.cfg"
@@ -1805,11 +1854,16 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
     def _suggest_video_output_path(self, container: str) -> Path:
         suffix = str(container or "mp4").strip().lower().lstrip(".") or "mp4"
         paths = self._list_photo_paths()
+        remembered_dir = self._video_export_last_output_dir
+        base_dir = remembered_dir if remembered_dir is not None and remembered_dir.is_dir() else None
         if paths:
             first_path = paths[0]
-            base_dir = first_path.parent
+            if base_dir is None:
+                base_dir = first_path.parent
             stem = f"{first_path.stem}__birdstamp_video_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             return base_dir / f"{stem}.{suffix}"
+        if base_dir is not None:
+            return base_dir / f"birdstamp_video_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{suffix}"
         return Path.cwd() / f"birdstamp_video_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{suffix}"
 
     def _build_video_export_jobs(self, paths: list[Path]) -> list[VideoFrameJob]:
@@ -1909,19 +1963,19 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
                 )
             return
 
-        default_path = self._suggest_video_output_path(request.container)
-        selected_filter = "MP4 视频 (*.mp4)" if str(request.container).lower() == "mp4" else "MOV 视频 (*.mov)"
-        file_path, _selected = QFileDialog.getSaveFileName(
-            self,
-            "导出视频",
-            str(default_path),
-            "MP4 视频 (*.mp4);;MOV 视频 (*.mov);;All Files (*.*)",
-            selected_filter,
-        )
-        if not file_path:
-            return
-
         try:
+            default_path = self._suggest_video_output_path(request.container)
+            selected_filter = "MP4 视频 (*.mp4)" if str(request.container).lower() == "mp4" else "MOV 视频 (*.mov)"
+            file_path, _selected = QFileDialog.getSaveFileName(
+                self,
+                "导出视频",
+                str(default_path),
+                "MP4 视频 (*.mp4);;MOV 视频 (*.mov);;All Files (*.*)",
+                selected_filter,
+            )
+            if not file_path:
+                return
+
             options = VideoExportOptions(
                 output_path=Path(file_path),
                 container=request.container,
@@ -1933,6 +1987,12 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
                 frame_width=request.frame_width,
                 frame_height=request.frame_height,
             )
+            output_path = options.normalized_output_path()
+            if not self._confirm_video_output_overwrite(output_path):
+                self._set_status("已取消视频导出。")
+                return
+            self._video_export_last_output_dir = output_path.parent
+            self._save_video_export_last_output_dir(output_path.parent)
             jobs = self._build_video_export_jobs(paths)
         except Exception as exc:
             self._show_error("视频导出参数无效", str(exc))

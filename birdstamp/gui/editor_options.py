@@ -14,20 +14,22 @@ _FALLBACK_OUTPUT_FORMAT_OPTIONS: list[tuple[str, str]] = [("png", "PNG"), ("jpg"
 _FALLBACK_VIDEO_CONTAINER_OPTIONS: list[tuple[str, str]] = [("mp4", "MP4"), ("mov", "MOV")]
 _FALLBACK_VIDEO_CODEC_OPTIONS: list[tuple[str, str]] = [("h264", "H.264 / libx264"), ("h265", "H.265 / libx265")]
 _FALLBACK_VIDEO_PRESET_OPTIONS: list[tuple[str, str]] = [("fast", "fast"), ("medium", "medium"), ("slow", "slow")]
+_FALLBACK_VIDEO_ORIENTATION_OPTIONS: list[tuple[str, str]] = [("横屏", "landscape"), ("竖屏", "portrait")]
 _FALLBACK_VIDEO_FRAME_SIZE_OPTIONS: list[dict[str, Any]] = [
     {"label": "首帧尺寸", "mode": "auto", "width": 0, "height": 0},
-    {"label": "1920 x 1080", "mode": "preset", "width": 1920, "height": 1080},
+    {"label": "4K UHD (3840 x 2160)", "mode": "preset", "width": 3840, "height": 2160},
     {"label": "自定义", "mode": "custom", "width": 0, "height": 0},
 ]
 _FALLBACK_VIDEO_FPS_OPTIONS = [12.0, 24.0, 25.0, 30.0, 60.0]
 _FALLBACK_DEFAULT_VIDEO_CONTAINER = "mp4"
 _FALLBACK_DEFAULT_VIDEO_CODEC = "h264"
-_FALLBACK_DEFAULT_VIDEO_PRESET = "medium"
-_FALLBACK_DEFAULT_VIDEO_FRAME_SIZE_MODE = "auto"
-_FALLBACK_DEFAULT_VIDEO_FPS = 25.0
+_FALLBACK_DEFAULT_VIDEO_PRESET = "slow"
+_FALLBACK_DEFAULT_VIDEO_ORIENTATION = "landscape"
+_FALLBACK_DEFAULT_VIDEO_FRAME_SIZE_MODE = "preset"
+_FALLBACK_DEFAULT_VIDEO_FPS = 30.0
 _FALLBACK_DEFAULT_VIDEO_CRF = 20
-_FALLBACK_DEFAULT_VIDEO_WIDTH = 1920
-_FALLBACK_DEFAULT_VIDEO_HEIGHT = 1080
+_FALLBACK_DEFAULT_VIDEO_WIDTH = 3840
+_FALLBACK_DEFAULT_VIDEO_HEIGHT = 2160
 _FALLBACK_COLOR_PRESETS: list[tuple[str, str]] = [("白色", "#FFFFFF"), ("黑色", "#111111")]
 _FALLBACK_DEFAULT_FIELD_TAG = "EXIF:Model"
 _FALLBACK_TAG_OPTIONS: list[tuple[str, str]] = [("机身型号 (EXIF)", "EXIF:Model")]
@@ -203,6 +205,10 @@ def load_editor_options() -> dict[str, Any]:
     video_container_options = _normalize_output_formats(raw.get("video_container_options"), _FALLBACK_VIDEO_CONTAINER_OPTIONS)
     video_codec_options = _normalize_labeled_values(raw.get("video_codec_options"), _FALLBACK_VIDEO_CODEC_OPTIONS)
     video_preset_options = _normalize_labeled_values(raw.get("video_preset_options"), _FALLBACK_VIDEO_PRESET_OPTIONS)
+    video_orientation_options = _normalize_labeled_values(
+        raw.get("video_orientation_options"),
+        _FALLBACK_VIDEO_ORIENTATION_OPTIONS,
+    )
     video_frame_size_options = _normalize_video_frame_size_options(raw.get("video_frame_size_options"))
     video_fps_options = _normalize_numeric_list(raw.get("video_fps_options"), _FALLBACK_VIDEO_FPS_OPTIONS)
     color_presets = _normalize_labeled_values(raw.get("color_presets"), _FALLBACK_COLOR_PRESETS)
@@ -228,6 +234,15 @@ def load_editor_options() -> dict[str, Any]:
     preset_values = {value for value, _label in video_preset_options}
     if default_video_preset not in preset_values:
         default_video_preset = video_preset_options[0][0] if video_preset_options else _FALLBACK_DEFAULT_VIDEO_PRESET
+
+    default_video_orientation = (
+        str(raw.get("default_video_orientation") or "").strip().lower() or _FALLBACK_DEFAULT_VIDEO_ORIENTATION
+    )
+    orientation_values = {value for _label, value in video_orientation_options}
+    if default_video_orientation not in orientation_values:
+        default_video_orientation = (
+            video_orientation_options[0][1] if video_orientation_options else _FALLBACK_DEFAULT_VIDEO_ORIENTATION
+        )
 
     default_video_frame_size_mode = (
         str(raw.get("default_video_frame_size_mode") or "").strip().lower() or _FALLBACK_DEFAULT_VIDEO_FRAME_SIZE_MODE
@@ -270,11 +285,13 @@ def load_editor_options() -> dict[str, Any]:
         "video_container_options": video_container_options,
         "video_codec_options": video_codec_options,
         "video_preset_options": video_preset_options,
+        "video_orientation_options": video_orientation_options,
         "video_frame_size_options": video_frame_size_options,
         "video_fps_options": video_fps_options,
         "default_video_container": default_video_container,
         "default_video_codec": default_video_codec,
         "default_video_preset": default_video_preset,
+        "default_video_orientation": default_video_orientation,
         "default_video_frame_size_mode": default_video_frame_size_mode,
         "default_video_fps": default_video_fps,
         "default_video_crf": default_video_crf,
@@ -295,11 +312,13 @@ OUTPUT_FORMAT_OPTIONS: list[tuple[str, str]] = _EDITOR_OPTIONS["output_format_op
 VIDEO_CONTAINER_OPTIONS: list[tuple[str, str]] = _EDITOR_OPTIONS["video_container_options"]
 VIDEO_CODEC_OPTIONS: list[tuple[str, str]] = _EDITOR_OPTIONS["video_codec_options"]
 VIDEO_PRESET_OPTIONS: list[tuple[str, str]] = _EDITOR_OPTIONS["video_preset_options"]
+VIDEO_ORIENTATION_OPTIONS: list[tuple[str, str]] = _EDITOR_OPTIONS["video_orientation_options"]
 VIDEO_FRAME_SIZE_OPTIONS: list[dict[str, Any]] = _EDITOR_OPTIONS["video_frame_size_options"]
 VIDEO_FPS_OPTIONS: list[float] = _EDITOR_OPTIONS["video_fps_options"]
 DEFAULT_VIDEO_CONTAINER: str = _EDITOR_OPTIONS["default_video_container"]
 DEFAULT_VIDEO_CODEC: str = _EDITOR_OPTIONS["default_video_codec"]
 DEFAULT_VIDEO_PRESET: str = _EDITOR_OPTIONS["default_video_preset"]
+DEFAULT_VIDEO_ORIENTATION: str = _EDITOR_OPTIONS["default_video_orientation"]
 DEFAULT_VIDEO_FRAME_SIZE_MODE: str = _EDITOR_OPTIONS["default_video_frame_size_mode"]
 DEFAULT_VIDEO_FPS: float = _EDITOR_OPTIONS["default_video_fps"]
 DEFAULT_VIDEO_CRF: int = _EDITOR_OPTIONS["default_video_crf"]
