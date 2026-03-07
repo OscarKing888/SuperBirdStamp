@@ -9,7 +9,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageColor, ImageOps
+from PIL import Image, ImageColor, ImageDraw, ImageOps
 from app_common.focus_calc import (
     CameraFocusType,
     extract_focus_box as _extract_focus_box_by_camera_type,
@@ -576,6 +576,79 @@ def transform_source_box_after_crop_padding(
     if right_n <= left_n or bottom_n <= top_n:
         return None
     return (left_n, top_n, right_n, bottom_n)
+
+
+def resolve_focus_box_after_processing(
+    raw_metadata: dict[str, Any],
+    *,
+    source_width: int,
+    source_height: int,
+    crop_box: tuple[float, float, float, float] | None,
+    outer_pad: tuple[int, int, int, int] = (0, 0, 0, 0),
+    apply_ratio_crop: bool = True,
+    camera_type: CameraFocusType | str | None = None,
+) -> tuple[float, float, float, float] | None:
+    if source_width <= 0 or source_height <= 0:
+        return None
+    focus_box = extract_focus_box_for_display(
+        raw_metadata,
+        source_width,
+        source_height,
+        camera_type=camera_type,
+    )
+    if focus_box is None:
+        return None
+    top, bottom, left, right = outer_pad
+    return transform_source_box_after_crop_padding(
+        focus_box,
+        crop_box=crop_box if apply_ratio_crop else None,
+        source_width=source_width,
+        source_height=source_height,
+        pt=top,
+        pb=bottom,
+        pl=left,
+        pr=right,
+    )
+
+
+def draw_focus_box_overlay(
+    image: Image.Image,
+    focus_box: tuple[float, float, float, float] | None,
+) -> Image.Image:
+    if focus_box is None:
+        return image
+    width, height = image.size
+    focus_px = normalized_box_to_pixel_box(focus_box, width, height)
+    if focus_px is None:
+        return image
+    left, top, right, bottom = focus_px
+    if right - left < 2 or bottom - top < 2:
+        return image
+
+    draw = ImageDraw.Draw(image)
+    outer_rect = (left, top, max(left, right - 1), max(top, bottom - 1))
+    draw.rectangle(outer_rect, outline="#000000", width=1)
+
+    inner_width = right - left
+    inner_height = bottom - top
+    if inner_width >= 4 and inner_height >= 4:
+        inner_rect = (
+            left + 1,
+            top + 1,
+            max(left + 1, right - 2),
+            max(top + 1, bottom - 2),
+        )
+        draw.rectangle(inner_rect, outline="#2EFF55", width=2)
+
+    if inner_width >= 8 and inner_height >= 8:
+        inner_black_rect = (
+            left + 3,
+            top + 3,
+            max(left + 3, right - 4),
+            max(top + 3, bottom - 4),
+        )
+        draw.rectangle(inner_black_rect, outline="#000000", width=1)
+    return image
 
 
 def resize_fit(image: Image.Image, max_long_edge: int) -> Image.Image:

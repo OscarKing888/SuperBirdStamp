@@ -778,12 +778,16 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         self.draw_text_check = QCheckBox("文本")
         self.draw_text_check.setChecked(True)
         self.draw_text_check.toggled.connect(self._on_output_settings_changed)
+        self.draw_focus_check = QCheckBox("焦点")
+        self.draw_focus_check.setChecked(False)
+        self.draw_focus_check.toggled.connect(self._on_output_settings_changed)
         overlay_row_widget = QWidget()
         overlay_row_layout = QHBoxLayout(overlay_row_widget)
         overlay_row_layout.setContentsMargins(0, 0, 0, 0)
         overlay_row_layout.setSpacing(10)
         overlay_row_layout.addWidget(self.draw_banner_check)
         overlay_row_layout.addWidget(self.draw_text_check)
+        overlay_row_layout.addWidget(self.draw_focus_check)
         overlay_row_layout.addStretch()
         global_form.addRow("叠加信息", overlay_row_widget)
 
@@ -1872,15 +1876,17 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         current_render_settings = self._build_current_render_settings()
         export_draw_banner = _parse_bool_value(current_render_settings.get("draw_banner"), True)
         export_draw_text = _parse_bool_value(current_render_settings.get("draw_text"), True)
+        export_draw_focus = _parse_bool_value(current_render_settings.get("draw_focus"), False)
         for path in paths:
             raw_metadata = dict(self._load_raw_metadata(path))
             photo_info = self._photo_info_for_display(path, raw_metadata=raw_metadata)
             metadata_context = _build_metadata_context(photo_info, raw_metadata)
             settings = self._clone_render_settings(self._render_settings_for_path(path, prefer_current_ui=False))
-            # 视频导出时，叠加信息的两个总开关跟随当前界面状态，
+            # 视频导出时，叠加信息的三个总开关跟随当前界面状态，
             # 但仍保留每张照片各自的模板/裁切重载。
             settings["draw_banner"] = export_draw_banner
             settings["draw_text"] = export_draw_text
+            settings["draw_focus"] = export_draw_focus
 
             source_image = None
             if self.current_source_image is not None and current_key and _path_key(path) == current_key:
