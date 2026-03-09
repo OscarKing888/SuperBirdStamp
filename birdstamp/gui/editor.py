@@ -53,6 +53,7 @@ from PyQt6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QProgressBar,
     QHeaderView,
     QScrollArea,
     QSlider,
@@ -102,12 +103,14 @@ from birdstamp.gui.editor_template_dialog import (
 )
 from app_common.preview_canvas import PreviewWithStatusBar
 from birdstamp.gui.editor_preview_canvas import EditorPreviewCanvas, EditorPreviewOverlayState
+from birdstamp.gui.editor_photo_metadata_loader import EditorPhotoListMetadataLoader
 from birdstamp.gui.editor_photo_list import (
     PHOTO_COL_CAPTURE_TIME,
     PHOTO_COL_NAME,
     PHOTO_COL_RATING,
     PHOTO_COL_RATIO,
     PHOTO_COL_ROW,
+    PHOTO_COL_SEQ,
     PHOTO_COL_TITLE,
     PHOTO_LIST_PHOTO_INFO_ROLE,
     PHOTO_LIST_PATH_ROLE,
@@ -288,6 +291,7 @@ def _get_bird_detector_error_message() -> str:
 
 _pil_to_qpixmap = editor_utils.pil_to_qpixmap
 _log = get_logger("editor")
+_PHOTO_LIST_META_PROGRESS_HIDE_DELAY_MS = 600
 
 
 # PreviewCanvas and PhotoListWidget now live in editor_preview_canvas.py / editor_photo_list.py
@@ -329,6 +333,13 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         self.current_raw_metadata: dict[str, Any] = {}
         self.current_metadata_context: dict[str, str] = {}
         self.raw_metadata_cache: dict[str, dict[str, Any]] = {}
+        self.photo_list_metadata_cache: dict[str, dict[str, Any]] = {}
+        self._photo_item_map: dict[str, QTreeWidgetItem] = {}
+        self._photo_list_metadata_pending_keys: set[str] = set()
+        self._photo_list_metadata_loader: EditorPhotoListMetadataLoader | None = None
+        self._pending_photo_list_metadata_loaders: list[EditorPhotoListMetadataLoader] = []
+        self._photo_list_metadata_loading = False
+        self._photo_list_header_fast_mode = False
         self._pending_preview_fit_reset: bool = False
         self._video_export_worker: VideoExportWorker | None = None
         self._image_export_last_output_dir: Path | None = self._load_image_export_last_output_dir()
@@ -633,6 +644,16 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         clear_btn.clicked.connect(self._clear_photos)
         photo_btn_row.addWidget(clear_btn)
         photos_layout.addLayout(photo_btn_row)
+
+        self.photo_list_progress = QProgressBar()
+        self.photo_list_progress.setMinimum(0)
+        self.photo_list_progress.setMaximum(1)
+        self.photo_list_progress.setValue(0)
+        self.photo_list_progress.setFixedHeight(18)
+        self.photo_list_progress.setTextVisible(True)
+        self.photo_list_progress.setFormat("照片信息 0/0")
+        self.photo_list_progress.hide()
+        photos_layout.addWidget(self.photo_list_progress)
 
         self.photo_list = PhotoListWidget()
         self.photo_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -1150,6 +1171,7 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
             QMessageBox.information(self, "视频导出进行中", "请先中断当前视频导出，或等待导出完成后再关闭窗口。")
             event.ignore()
             return
+        self._stop_photo_list_metadata_loader(wait=True, reset_progress=True)
         super().closeEvent(event)
 
     def _on_preview_toolbar_toggled(self, _checked: bool) -> None:
@@ -1586,6 +1608,196 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
             return "-"
         return "★" * stars
 
+    def _remember_photo_item(self, path: Path, item: QTreeWidgetItem) -> None:
+        self._photo_item_map[_path_key(path)] = item
+
+    def _forget_photo_item(self, path: Path | str) -> None:
+        try:
+            key = _path_key(path if isinstance(path, Path) else Path(str(path)))
+        except Exception:
+            return
+        self._photo_item_map.pop(key, None)
+        self.photo_list_metadata_cache.pop(key, None)
+        self._photo_list_metadata_pending_keys.discard(key)
+
+    def _photo_list_display_metadata_for_path(self, path: Path) -> dict[str, Any]:
+        key = _path_key(path)
+        cached = self.raw_metadata_cache.get(key)
+        if isinstance(cached, dict) and cached:
+            return cached
+        cached = self.photo_list_metadata_cache.get(key)
+        if isinstance(cached, dict) and cached:
+            return cached
+        return {"SourceFile": str(path)}
+
+    def _set_photo_list_progress(self, current: int, total: int) -> None:
+        total_value = max(0, int(total))
+        current_value = max(0, min(int(current), max(1, total_value)))
+        self.photo_list_progress.setMaximum(max(1, total_value))
+        self.photo_list_progress.setValue(current_value)
+        self.photo_list_progress.setFormat(f"照片信息 {current_value}/{total_value}")
+        if total_value > 0:
+            self.photo_list_progress.show()
+
+    def _reset_photo_list_progress(self) -> None:
+        self.photo_list_progress.setMaximum(1)
+        self.photo_list_progress.setValue(0)
+        self.photo_list_progress.setFormat("照片信息 0/0")
+        self.photo_list_progress.hide()
+
+    def _set_photo_list_header_fast_mode(self, enabled: bool) -> None:
+        if enabled == self._photo_list_header_fast_mode:
+            return
+        header = self.photo_list.header()
+        try:
+            if enabled:
+                header.setSectionResizeMode(PHOTO_COL_CAPTURE_TIME, QHeaderView.ResizeMode.Interactive)
+                header.setSectionResizeMode(PHOTO_COL_RATIO, QHeaderView.ResizeMode.Interactive)
+                header.setSectionResizeMode(PHOTO_COL_RATING, QHeaderView.ResizeMode.Interactive)
+                self._photo_list_header_fast_mode = True
+                return
+            header.setSectionResizeMode(PHOTO_COL_SEQ, QHeaderView.ResizeMode.Fixed)
+            header.setSectionResizeMode(PHOTO_COL_NAME, QHeaderView.ResizeMode.Stretch)
+            header.setSectionResizeMode(PHOTO_COL_CAPTURE_TIME, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(PHOTO_COL_TITLE, QHeaderView.ResizeMode.Stretch)
+            header.setSectionResizeMode(PHOTO_COL_RATIO, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(PHOTO_COL_RATING, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(PHOTO_COL_ROW, QHeaderView.ResizeMode.Fixed)
+            self._photo_list_header_fast_mode = False
+        except Exception:
+            pass
+
+    def _detach_photo_list_metadata_loader(
+        self,
+        loader: EditorPhotoListMetadataLoader,
+        *,
+        wait: bool,
+    ) -> None:
+        loader.stop()
+        try:
+            loader.metadata_batch_ready.disconnect(self._on_photo_list_metadata_batch_ready)
+        except Exception:
+            pass
+        try:
+            loader.progress_updated.disconnect(self._on_photo_list_metadata_progress)
+        except Exception:
+            pass
+        try:
+            loader.finished.disconnect(self._on_photo_list_metadata_loader_finished)
+        except Exception:
+            pass
+        if wait:
+            try:
+                if loader.isRunning():
+                    loader.wait(2500)
+            except Exception:
+                pass
+            return
+        self._pending_photo_list_metadata_loaders.append(loader)
+        try:
+            loader.finished.connect(
+                lambda ldr=loader: (
+                    self._pending_photo_list_metadata_loaders.remove(ldr)
+                    if ldr in self._pending_photo_list_metadata_loaders else None
+                )
+            )
+        except Exception:
+            pass
+
+    def _stop_photo_list_metadata_loader(
+        self,
+        *,
+        wait: bool = False,
+        reset_progress: bool = False,
+    ) -> None:
+        loader = self._photo_list_metadata_loader
+        self._photo_list_metadata_loader = None
+        if loader is not None:
+            self._detach_photo_list_metadata_loader(loader, wait=wait)
+        if wait and self._pending_photo_list_metadata_loaders:
+            pending = list(self._pending_photo_list_metadata_loaders)
+            self._pending_photo_list_metadata_loaders.clear()
+            for worker in pending:
+                try:
+                    if worker.isRunning():
+                        worker.wait(2500)
+                except Exception:
+                    pass
+        if reset_progress:
+            self._photo_list_metadata_loading = False
+            self._set_photo_list_header_fast_mode(False)
+            self.photo_list.setSortingEnabled(True)
+            self._reset_photo_list_progress()
+
+    def _restart_photo_list_metadata_loader(self) -> None:
+        pending_paths = [
+            path for path in self._list_photo_paths()
+            if _path_key(path) in self._photo_list_metadata_pending_keys
+        ]
+        self._stop_photo_list_metadata_loader(wait=False, reset_progress=False)
+        if not pending_paths:
+            self._finish_photo_list_metadata_loading()
+            return
+        self._photo_list_metadata_loading = True
+        self._set_photo_list_header_fast_mode(True)
+        self.photo_list.setSortingEnabled(False)
+        self._set_photo_list_progress(0, len(pending_paths))
+        loader = EditorPhotoListMetadataLoader([str(path) for path in pending_paths], parent=self)
+        loader.metadata_batch_ready.connect(self._on_photo_list_metadata_batch_ready)
+        loader.progress_updated.connect(self._on_photo_list_metadata_progress)
+        loader.finished.connect(self._on_photo_list_metadata_loader_finished)
+        self._photo_list_metadata_loader = loader
+        loader.start()
+
+    def _finish_photo_list_metadata_loading(self) -> None:
+        self._photo_list_metadata_loading = False
+        self._set_photo_list_header_fast_mode(False)
+        self.photo_list.setSortingEnabled(True)
+        self.photo_list.resort()
+        self.photo_list.refresh_row_numbers()
+        if self.photo_list_progress.maximum() > 0:
+            self.photo_list_progress.setValue(self.photo_list_progress.maximum())
+            QTimer.singleShot(_PHOTO_LIST_META_PROGRESS_HIDE_DELAY_MS, self._reset_photo_list_progress)
+        else:
+            self._reset_photo_list_progress()
+
+    def _apply_photo_list_metadata_batch(self, batch: dict[str, dict[str, Any]]) -> None:
+        if not batch:
+            return
+        for norm_path, raw_metadata in batch.items():
+            path = Path(norm_path)
+            key = _path_key(path)
+            if not self._find_photo_item_by_path(path):
+                self._forget_photo_item(path)
+                continue
+            if isinstance(raw_metadata, dict):
+                self.photo_list_metadata_cache[key] = dict(raw_metadata)
+            self._photo_list_metadata_pending_keys.discard(key)
+            settings = self.photo_render_overrides.get(key)
+            self._update_photo_list_item_display(
+                path,
+                raw_metadata=raw_metadata,
+                settings=settings,
+                resort=False,
+            )
+        self.photo_list.refresh_row_numbers()
+
+    def _on_photo_list_metadata_batch_ready(self, batch: dict[str, dict[str, Any]]) -> None:
+        if self.sender() is not self._photo_list_metadata_loader:
+            return
+        self._apply_photo_list_metadata_batch(batch)
+
+    def _on_photo_list_metadata_progress(self, current: int, total: int) -> None:
+        if self.sender() is not self._photo_list_metadata_loader:
+            return
+        self._set_photo_list_progress(current, total)
+
+    def _on_photo_list_metadata_loader_finished(self) -> None:
+        if self.sender() is not self._photo_list_metadata_loader:
+            return
+        self._photo_list_metadata_loader = None
+        self._finish_photo_list_metadata_loading()
+
     def _next_photo_sequence_value(self) -> int:
         next_value = 1
         for idx in range(self.photo_list.topLevelItemCount()):
@@ -1602,12 +1814,16 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
 
     def _find_photo_item_by_path(self, path: Path) -> QTreeWidgetItem | None:
         key = _path_key(path)
+        item = self._photo_item_map.get(key)
+        if item is not None:
+            return item
         for idx in range(self.photo_list.topLevelItemCount()):
             item = self.photo_list.topLevelItem(idx)
             if item is None:
                 continue
             raw = item.data(PHOTO_COL_ROW, PHOTO_LIST_PATH_ROLE)
             if isinstance(raw, str) and _path_key(Path(raw)) == key:
+                self._photo_item_map[key] = item
                 return item
         return None
 
@@ -1617,12 +1833,17 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         *,
         raw_metadata: dict[str, Any] | None = None,
         settings: dict[str, Any] | None = None,
+        resort: bool = True,
     ) -> None:
         item = self._find_photo_item_by_path(path)
         if item is None:
             return
 
-        metadata = raw_metadata if isinstance(raw_metadata, dict) else self._load_raw_metadata(path)
+        metadata = (
+            raw_metadata
+            if isinstance(raw_metadata, dict)
+            else self._photo_list_display_metadata_for_path(path)
+        )
         photo_info = self._photo_info_for_display(path, raw_metadata=metadata)
         filename_text = self._display_filename_from_photo_info(photo_info) or path.name
         capture_time_text, capture_time_sort = self._extract_display_capture_time_from_metadata(photo_info)
@@ -1663,7 +1884,8 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
             PHOTO_LIST_SORT_ROLE,
             (0, int(rating_value)) if rating_value is not None else (1, 0),
         )
-        self.photo_list.resort()
+        if resort:
+            self.photo_list.resort()
 
     def _list_photo_paths(self) -> list[Path]:
         paths: list[Path] = []
@@ -1701,6 +1923,7 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         default_settings = self._build_current_render_settings()
         add_count = 0
         last_added_item: QTreeWidgetItem | None = None
+        added_paths: list[Path] = []
 
         for path in valid_paths:
             key = _path_key(path)
@@ -1710,20 +1933,28 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
 
             current_settings = self._clone_render_settings(default_settings)
             self.photo_render_overrides[key] = current_settings
-            raw_metadata = self._load_raw_metadata(path)
-            photo_info = _template_context.ensure_photo_info(path, raw_metadata=raw_metadata)
             item = PhotoListItem(["", "", "", "", "", "", ""])
             sequence_value = self._next_photo_sequence_value()
+            item.setData(PHOTO_COL_SEQ, PHOTO_LIST_SORT_ROLE, (0, sequence_value))
             item.setData(PHOTO_COL_ROW, PHOTO_LIST_PATH_ROLE, str(path))
-            item.setData(PHOTO_COL_ROW, PHOTO_LIST_PHOTO_INFO_ROLE, photo_info)
+            item.setData(PHOTO_COL_ROW, PHOTO_LIST_PHOTO_INFO_ROLE, _template_context.ensure_photo_info(path))
             item.setData(PHOTO_COL_ROW, PHOTO_LIST_SEQUENCE_ROLE, sequence_value)
             item.setData(PHOTO_COL_ROW, PHOTO_LIST_SORT_ROLE, (0, sequence_value))
             item.setToolTip(PHOTO_COL_ROW, "")
             item.setTextAlignment(PHOTO_COL_ROW, int(Qt.AlignmentFlag.AlignCenter))
             self.photo_list.addTopLevelItem(item)
-            self._update_photo_list_item_display(path, raw_metadata=raw_metadata, settings=current_settings)
+            self._remember_photo_item(path, item)
+            self.photo_list_metadata_cache[key] = {"SourceFile": str(path)}
+            self._photo_list_metadata_pending_keys.add(key)
+            self._update_photo_list_item_display(
+                path,
+                raw_metadata=self.photo_list_metadata_cache[key],
+                settings=current_settings,
+                resort=False,
+            )
             add_count += 1
             last_added_item = item
+            added_paths.append(path)
 
         if add_count == 0 and total_auto_added_report_db_count == 0:
             self._set_status("没有新增照片。")
@@ -1736,7 +1967,10 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
             if first_item is not None:
                 self.photo_list.setCurrentItem(first_item)
 
+        self.photo_list.resort()
         self.photo_list.refresh_row_numbers()
+        if added_paths:
+            self._restart_photo_list_metadata_loader()
 
         if add_count > 0 and total_auto_added_report_db_count > 0:
             self._set_status(f"已添加 {add_count} 张照片，并自动添加 {total_auto_added_report_db_count} 个 report.db。")
@@ -1784,7 +2018,9 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         for item in selected_items:
             raw = item.data(PHOTO_COL_ROW, PHOTO_LIST_PATH_ROLE)
             if isinstance(raw, str):
-                removed_keys.append(_path_key(Path(raw)))
+                path = Path(raw)
+                removed_keys.append(_path_key(path))
+                self._forget_photo_item(path)
             row = self.photo_list.indexOfTopLevelItem(item)
             if row >= 0:
                 self.photo_list.takeTopLevelItem(row)
@@ -1795,6 +2031,10 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         if removed_keys:
             self._bird_box_cache.clear()
             self.photo_list.refresh_row_numbers()
+            if self._photo_list_metadata_pending_keys:
+                self._restart_photo_list_metadata_loader()
+            else:
+                self._stop_photo_list_metadata_loader(wait=False, reset_progress=True)
 
         if self.photo_list.topLevelItemCount() == 0:
             self.placeholder_path = None
@@ -1810,8 +2050,12 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         self._set_status(f"已删除 {len(selected_items)} 项。")
 
     def _clear_photos(self) -> None:
+        self._stop_photo_list_metadata_loader(wait=False, reset_progress=True)
         self.photo_list.clear()
         self.raw_metadata_cache.clear()
+        self.photo_list_metadata_cache.clear()
+        self._photo_item_map.clear()
+        self._photo_list_metadata_pending_keys.clear()
         self.photo_render_overrides.clear()
         self._bird_box_cache.clear()
         self.placeholder_path = None
@@ -1895,6 +2139,8 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
                 raw_metadata = merged
 
         self.raw_metadata_cache[key] = raw_metadata
+        self.photo_list_metadata_cache[key] = dict(raw_metadata)
+        self._photo_list_metadata_pending_keys.discard(key)
         return raw_metadata
 
     def _suggest_video_output_path(self, container: str) -> Path:

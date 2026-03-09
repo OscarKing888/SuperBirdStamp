@@ -44,6 +44,71 @@ class PhotoListItem(QTreeWidgetItem):
     def __init__(self, texts: list[str]) -> None:
         super().__init__(texts)
 
+    def __lt__(self, other: QTreeWidgetItem) -> bool:
+        """优先按业务排序键比较，缺省时再退回文本与添加顺序。"""
+        tree_widget = self.treeWidget()
+        column = tree_widget.sortColumn() if tree_widget is not None else PHOTO_COL_SEQ
+
+        self_sort_value = self._column_sort_value(column)
+        other_sort_value = self._column_sort_value_for_item(other, column)
+        if self_sort_value is not None and other_sort_value is not None and self_sort_value != other_sort_value:
+            try:
+                return self_sort_value < other_sort_value
+            except TypeError:
+                return str(self_sort_value) < str(other_sort_value)
+
+        self_text = (self.text(column) or "").casefold()
+        other_text = (other.text(column) or "").casefold()
+        if self_text != other_text:
+            return self_text < other_text
+
+        self_sequence = self._sequence_value()
+        other_sequence = self._sequence_value_for_item(other)
+        if self_sequence is not None and other_sequence is not None and self_sequence != other_sequence:
+            return self_sequence < other_sequence
+
+        return super().__lt__(other)
+
+    def _column_sort_value(self, column: int) -> Any:
+        value = self.data(column, PHOTO_LIST_SORT_ROLE)
+        if value is not None:
+            return value
+        if column == PHOTO_COL_SEQ:
+            sequence = self._sequence_value()
+            if sequence is not None:
+                return (0, sequence)
+        return None
+
+    def _sequence_value(self) -> int | None:
+        raw_value = self.data(PHOTO_COL_ROW, PHOTO_LIST_SEQUENCE_ROLE)
+        try:
+            return int(raw_value)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _column_sort_value_for_item(item: QTreeWidgetItem, column: int) -> Any:
+        if isinstance(item, PhotoListItem):
+            return item._column_sort_value(column)
+        value = item.data(column, PHOTO_LIST_SORT_ROLE)
+        if value is not None:
+            return value
+        if column == PHOTO_COL_SEQ:
+            try:
+                return (0, int(item.data(PHOTO_COL_ROW, PHOTO_LIST_SEQUENCE_ROLE)))
+            except Exception:
+                return None
+        return None
+
+    @staticmethod
+    def _sequence_value_for_item(item: QTreeWidgetItem) -> int | None:
+        if isinstance(item, PhotoListItem):
+            return item._sequence_value()
+        try:
+            return int(item.data(PHOTO_COL_ROW, PHOTO_LIST_SEQUENCE_ROLE))
+        except Exception:
+            return None
+
 
 class PhotoListWidget(FileListPanel):
     """
@@ -94,12 +159,13 @@ class PhotoListWidget(FileListPanel):
         # 主编辑器沿用通用文件列表的编号列，并收敛为 7 列（含隐藏 ROW 数据列）。
         self._tree_widget.setColumnCount(7)
         self._tree_widget.setHeaderLabels(["#", "文件名", "拍摄时间", "鸟名", "裁切比例", "标星", ""])
-        self._tree_widget.setSortingEnabled(False)
         self._tree_widget.setAcceptDrops(True)
         self._tree_widget.setDragDropMode(QAbstractItemView.DragDropMode.DropOnly)
 
         header = self._tree_widget.header()
         header.setStretchLastSection(False)
+        header.setSectionsClickable(True)
+        header.setSortIndicatorShown(True)
         header.setSectionResizeMode(PHOTO_COL_SEQ, QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(PHOTO_COL_NAME, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(PHOTO_COL_CAPTURE_TIME, QHeaderView.ResizeMode.ResizeToContents)
@@ -119,6 +185,10 @@ class PhotoListWidget(FileListPanel):
         self._tree_widget.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._tree_widget.setRootIsDecorated(False)
         self._tree_widget.setUniformRowHeights(True)
+        header.sortIndicatorChanged.connect(self._on_sort_indicator_changed)
+        header.setSortIndicator(PHOTO_COL_SEQ, Qt.SortOrder.AscendingOrder)
+        self._tree_widget.setSortingEnabled(True)
+        self._tree_widget.sortByColumn(PHOTO_COL_SEQ, Qt.SortOrder.AscendingOrder)
 
     def _hide_non_tree_ui(self) -> None:
         # 隐藏已知控件
@@ -245,6 +315,9 @@ class PhotoListWidget(FileListPanel):
         except Exception:
             pass
 
+    def setSortingEnabled(self, enabled: bool) -> None:  # type: ignore[override]
+        self._tree_widget.setSortingEnabled(bool(enabled))
+
     def header(self):  # noqa: ANN201
         return self._tree_widget.header()
 
@@ -288,9 +361,31 @@ class PhotoListWidget(FileListPanel):
     def selectedItems(self) -> list[QTreeWidgetItem]:
         return list(self._tree_widget.selectedItems())
 
+    def _on_sort_indicator_changed(self, column: int, _order: Qt.SortOrder) -> None:
+        if column == PHOTO_COL_ROW:
+            header = self._tree_widget.header()
+            try:
+                header.blockSignals(True)
+                header.setSortIndicator(PHOTO_COL_SEQ, Qt.SortOrder.AscendingOrder)
+            finally:
+                header.blockSignals(False)
+            self._tree_widget.sortByColumn(PHOTO_COL_SEQ, Qt.SortOrder.AscendingOrder)
+        self.refresh_row_numbers()
+
     def resort(self) -> None:
-        """主编辑器列表固定按编号列保持添加顺序。"""
-        self._tree_widget.sortByColumn(PHOTO_COL_SEQ, Qt.SortOrder.AscendingOrder)
+        """按当前表头排序规则重排；首次默认按编号列升序。"""
+        header = self._tree_widget.header()
+        column = header.sortIndicatorSection()
+        order = header.sortIndicatorOrder()
+        if column < 0 or column >= self._tree_widget.columnCount() or column == PHOTO_COL_ROW:
+            column = PHOTO_COL_SEQ
+            order = Qt.SortOrder.AscendingOrder
+            try:
+                header.blockSignals(True)
+                header.setSortIndicator(column, order)
+            finally:
+                header.blockSignals(False)
+        self._tree_widget.sortByColumn(column, order)
 
     def refresh_row_numbers(self) -> None:
         """刷新行号显示；统一复用 FileListPanel 的通用实现。"""
