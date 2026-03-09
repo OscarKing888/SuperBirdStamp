@@ -81,3 +81,5 @@ def test_draw_focus_box_overlay_uses_expected_border_colors() -> None:
     draw_focus_box_overlay(image, (0.2, 0.2, 0.8, 0.8))
     assert image.getpixel((20, 20)) == (0, 0, 0)
     assert image.getpixel((21, 21)) == (46, 255, 85)
+    assert image.getpixel((24, 24)) == (46, 255, 85)
+    assert image.getpixel((25, 25)) == (0, 0, 0)

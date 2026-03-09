@@ -644,6 +644,42 @@ def draw_focus_box_overlay(
     image: Image.Image,
     focus_box: tuple[float, float, float, float] | None,
 ) -> Image.Image:
+    focus_outer_black_width = 1
+    focus_green_width = 4
+    focus_inner_black_width = 1
+
+    def _draw_box_ring(
+        draw: ImageDraw.ImageDraw,
+        *,
+        left_px: int,
+        top_px: int,
+        right_px: int,
+        bottom_px: int,
+        thickness: int,
+        fill: str,
+    ) -> tuple[int, int, int, int]:
+        if thickness <= 0:
+            return (left_px, top_px, right_px, bottom_px)
+        width_px = right_px - left_px
+        height_px = bottom_px - top_px
+        ring = min(int(thickness), max(0, width_px // 2), max(0, height_px // 2))
+        if ring <= 0:
+            return (left_px, top_px, right_px, bottom_px)
+
+        top_band_bottom = top_px + ring - 1
+        bottom_band_top = bottom_px - ring
+        draw.rectangle((left_px, top_px, right_px - 1, top_band_bottom), fill=fill)
+        draw.rectangle((left_px, bottom_band_top, right_px - 1, bottom_px - 1), fill=fill)
+
+        inner_top = top_px + ring
+        inner_bottom = bottom_px - ring
+        if inner_bottom > inner_top:
+            left_band_right = left_px + ring - 1
+            right_band_left = right_px - ring
+            draw.rectangle((left_px, inner_top, left_band_right, inner_bottom - 1), fill=fill)
+            draw.rectangle((right_band_left, inner_top, right_px - 1, inner_bottom - 1), fill=fill)
+        return (left_px + ring, top_px + ring, right_px - ring, bottom_px - ring)
+
     if focus_box is None:
         return image
     width, height = image.size
@@ -655,28 +691,33 @@ def draw_focus_box_overlay(
         return image
 
     draw = ImageDraw.Draw(image)
-    outer_rect = (left, top, max(left, right - 1), max(top, bottom - 1))
-    draw.rectangle(outer_rect, outline="#000000", width=1)
-
-    inner_width = right - left
-    inner_height = bottom - top
-    if inner_width >= 4 and inner_height >= 4:
-        inner_rect = (
-            left + 1,
-            top + 1,
-            max(left + 1, right - 2),
-            max(top + 1, bottom - 2),
-        )
-        draw.rectangle(inner_rect, outline="#2EFF55", width=2)
-
-    if inner_width >= 8 and inner_height >= 8:
-        inner_black_rect = (
-            left + 3,
-            top + 3,
-            max(left + 3, right - 4),
-            max(top + 3, bottom - 4),
-        )
-        draw.rectangle(inner_black_rect, outline="#000000", width=1)
+    ring_left, ring_top, ring_right, ring_bottom = _draw_box_ring(
+        draw,
+        left_px=left,
+        top_px=top,
+        right_px=right,
+        bottom_px=bottom,
+        thickness=focus_outer_black_width,
+        fill="#000000",
+    )
+    ring_left, ring_top, ring_right, ring_bottom = _draw_box_ring(
+        draw,
+        left_px=ring_left,
+        top_px=ring_top,
+        right_px=ring_right,
+        bottom_px=ring_bottom,
+        thickness=focus_green_width,
+        fill="#2EFF55",
+    )
+    _draw_box_ring(
+        draw,
+        left_px=ring_left,
+        top_px=ring_top,
+        right_px=ring_right,
+        bottom_px=ring_bottom,
+        thickness=focus_inner_black_width,
+        fill="#000000",
+    )
     return image
 
 
