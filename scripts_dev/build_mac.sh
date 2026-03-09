@@ -99,7 +99,25 @@ if [[ -f "$PLIST_FILE" ]] && command -v plutil &>/dev/null; then
         echo "       Check the PyInstaller spec console/windowed setting." >&2
         exit 1
     fi
-    echo "Bundle sanity check PASSED (foreground GUI app)."
+echo "Bundle sanity check PASSED (foreground GUI app)."
+fi
+
+# ── exiftool availability check (Finder-like env) ────────────────────────────
+echo ""
+echo "Metadata smoke test — checking exiftool discovery under app-like PATH ..."
+if env -i HOME="$HOME" PATH="/usr/bin:/bin:/usr/sbin:/sbin" "$PYTHON" - <<'PY'
+from app_common.exif_io.exiftool_path import get_exiftool_executable_path
+
+path = get_exiftool_executable_path()
+if not path:
+    raise SystemExit(1)
+print(path)
+PY
+then
+    echo "  Metadata smoke test PASSED"
+else
+    echo "  WARNING: Finder-like environment could not resolve exiftool."
+    echo "           打包后的 app 可能无法读取焦点元数据；请安装 exiftool 到常见绝对路径。"
 fi
 
 # ── smoke test ────────────────────────────────────────────────────────────────
