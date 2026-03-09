@@ -6,6 +6,7 @@ import threading
 
 from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFormLayout,
     QGroupBox,
@@ -47,6 +48,7 @@ class VideoExportRequest:
     frame_size_mode: str
     frame_width: int
     frame_height: int
+    preserve_temp_files: bool = True
 
 
 class VideoExportPanel(QGroupBox):
@@ -159,9 +161,14 @@ class VideoExportPanel(QGroupBox):
         preset_layout.addWidget(self.crf_spin)
         form.addRow("编码质量", preset_widget)
 
+        self.preserve_temp_files_check = QCheckBox("保留临时文件")
+        self.preserve_temp_files_check.setChecked(True)
+        self.preserve_temp_files_check.setToolTip("保留并复用已渲染的视频帧；当图像导出选项未变化时，下次可直接复用。")
+        form.addRow("帧缓存", self.preserve_temp_files_check)
+
         root.addLayout(form)
 
-        self.hint_label = QLabel("按当前文件列表顺序生成视频，需要 ffmpeg；导出过程中可中断，并保留已渲染帧。")
+        self.hint_label = QLabel("按当前文件列表顺序生成视频，需要 ffmpeg；勾选“保留临时文件”后，同一输出任务在图像选项不变时可复用已渲染帧。")
         self.hint_label.setStyleSheet("color: #7A7A7A; font-size: 11px;")
         self.hint_label.setWordWrap(True)
         root.addWidget(self.hint_label)
@@ -251,6 +258,7 @@ class VideoExportPanel(QGroupBox):
             frame_size_mode=mode,
             frame_width=width,
             frame_height=height,
+            preserve_temp_files=bool(self.preserve_temp_files_check.isChecked()),
         )
 
     def set_busy(self, busy: bool, *, status_text: str | None = None) -> None:
@@ -264,6 +272,7 @@ class VideoExportPanel(QGroupBox):
         self.frame_height_spin.setEnabled(not busy and str(self.current_frame_size_data().get("mode") or "") == "custom")
         self.preset_combo.setEnabled(not busy)
         self.crf_spin.setEnabled(not busy)
+        self.preserve_temp_files_check.setEnabled(not busy)
         self.export_button.setEnabled(not busy)
         self.cancel_button.setEnabled(busy)
         self.export_button.setText("正在生成..." if busy else "生成视频")

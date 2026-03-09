@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -32,6 +34,7 @@ _PLATFORM_TOOL_SUBDIR = {
 }
 _BIRD_DETECT_WARNING_EMITTED = False
 _MAX_AUTO_VIDEO_RENDER_WORKERS = 6
+_VIDEO_RENDER_CACHE_VERSION = 1
 
 _build_metadata_context = editor_utils.build_metadata_context
 _safe_color = editor_utils.safe_color
@@ -94,6 +97,7 @@ class VideoExportOptions:
     background_color: str = DEFAULT_VIDEO_BACKGROUND_COLOR
     render_workers: int = DEFAULT_VIDEO_RENDER_WORKERS
     overwrite: bool = True
+    preserve_temp_files: bool = True
 
     def normalized_output_path(self) -> Path:
         container = str(self.container or "mp4").strip().lower().lstrip(".")
@@ -303,6 +307,7 @@ def validate_video_export_options(options: VideoExportOptions) -> VideoExportOpt
         background_color=_safe_color(str(options.background_color or DEFAULT_VIDEO_BACKGROUND_COLOR), DEFAULT_VIDEO_BACKGROUND_COLOR),
         render_workers=render_workers,
         overwrite=bool(options.overwrite),
+        preserve_temp_files=bool(options.preserve_temp_files),
     )
 
 
@@ -338,6 +343,35 @@ def _source_signature(path: Path) -> str:
         return f"{_path_key(path)}:{stat.st_size}:{stat.st_mtime_ns}"
     except Exception:
         return _path_key(path)
+
+
+def _json_dumps_stable(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _render_cache_key(jobs: list[VideoFrameJob], options: VideoExportOptions) -> str:
+    validated = validate_video_export_options(options)
+    payload = {
+        "version": _VIDEO_RENDER_CACHE_VERSION,
+        "frame_size_mode": validated.frame_size_mode,
+        "frame_width": int(validated.frame_width),
+        "frame_height": int(validated.frame_height),
+        "background_color": str(validated.background_color or DEFAULT_VIDEO_BACKGROUND_COLOR),
+        "jobs": [
+            {
+                "path": str(job.path.resolve(strict=False)),
+                "source_signature": _source_signature(job.path),
+                "settings": _clone_render_settings(job.settings),
+            }
+            for job in jobs
+        ],
+    }
+    return hashlib.sha1(_json_dumps_stable(payload).encode("utf-8")).hexdigest()
+
+
+def _sanitize_video_work_name(text: str) -> str:
+    sanitized = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in str(text or "").strip())
+    return sanitized or "video"
 
 
 def _clone_render_settings(settings: dict[str, Any]) -> dict[str, Any]:
@@ -869,13 +903,100 @@ def _subprocess_popen_kwargs() -> dict[str, Any]:
     return kwargs
 
 
-def _create_video_work_dir(output_path: Path) -> Path:
+def _persistent_video_work_dir(output_path: Path) -> Path:
     parent_dir = output_path.parent
     parent_dir.mkdir(parents=True, exist_ok=True)
+    suffix_tag = output_path.suffix.lower().lstrip(".") or "video"
+    safe_name = _sanitize_video_work_name(f"{output_path.stem}__{suffix_tag}")
+    return parent_dir / f"{safe_name}__birdstamp_video_work"
+
+
+def _create_video_work_dir(output_path: Path, *, preserve_temp_files: bool) -> Path:
+    parent_dir = output_path.parent
+    parent_dir.mkdir(parents=True, exist_ok=True)
+    if preserve_temp_files:
+        return _persistent_video_work_dir(output_path)
     stem = output_path.stem.strip() or "video"
-    safe_stem = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in stem) or "video"
+    safe_stem = _sanitize_video_work_name(stem)
     work_dir_text = tempfile.mkdtemp(prefix=f"{safe_stem}__birdstamp_video_work_", dir=str(parent_dir))
     return Path(work_dir_text)
+
+
+def _render_manifest_path(work_dir: Path) -> Path:
+    return work_dir / "render_manifest.json"
+
+
+def _write_render_manifest(work_dir: Path, *, cache_key: str, target_size: tuple[int, int], total: int) -> None:
+    payload = {
+        "version": _VIDEO_RENDER_CACHE_VERSION,
+        "cache_key": str(cache_key or "").strip(),
+        "target_size": [int(target_size[0]), int(target_size[1])],
+        "total": max(0, int(total)),
+    }
+    _render_manifest_path(work_dir).write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _load_render_manifest(work_dir: Path) -> dict[str, Any] | None:
+    manifest_path = _render_manifest_path(work_dir)
+    try:
+        raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _manifest_target_size(manifest: dict[str, Any] | None) -> tuple[int, int] | None:
+    if not isinstance(manifest, dict):
+        return None
+    raw_size = manifest.get("target_size")
+    if not isinstance(raw_size, (list, tuple)) or len(raw_size) != 2:
+        return None
+    try:
+        width = int(raw_size[0])
+        height = int(raw_size[1])
+    except Exception:
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    return _ensure_even_size(width, height)
+
+
+def _render_cache_is_reusable(
+    manifest: dict[str, Any] | None,
+    *,
+    cache_key: str,
+    total: int,
+) -> bool:
+    if not isinstance(manifest, dict):
+        return False
+    if int(manifest.get("version") or 0) != _VIDEO_RENDER_CACHE_VERSION:
+        return False
+    if str(manifest.get("cache_key") or "").strip() != str(cache_key or "").strip():
+        return False
+    if int(manifest.get("total") or -1) != int(total):
+        return False
+    return _manifest_target_size(manifest) is not None
+
+
+def _existing_rendered_frame_indices(frames_dir: Path, expected_total: int) -> set[int]:
+    indices: set[int] = set()
+    if expected_total <= 0 or not frames_dir.is_dir():
+        return indices
+    for frame_path in frames_dir.glob("frame_*.png"):
+        if not frame_path.is_file():
+            continue
+        stem = frame_path.stem
+        _, _, suffix = stem.partition("_")
+        try:
+            index = int(suffix)
+        except Exception:
+            continue
+        if 1 <= index <= int(expected_total):
+            indices.add(index)
+    return indices
 
 
 def _list_rendered_frame_paths(frames_dir: Path) -> list[Path]:
@@ -1029,73 +1150,115 @@ def export_video(
     bird_box_cache: dict[str, tuple[float, float, float, float] | None] = {}
     bird_box_lock = threading.Lock()
     total = len(jobs)
-    work_dir = _create_video_work_dir(output_path)
+    cache_key = _render_cache_key(jobs, validated)
+    work_dir = _create_video_work_dir(output_path, preserve_temp_files=validated.preserve_temp_files)
+    reusable_manifest: dict[str, Any] | None = None
+    if validated.preserve_temp_files and work_dir.exists():
+        reusable_manifest = _load_render_manifest(work_dir)
+        if not _render_cache_is_reusable(reusable_manifest, cache_key=cache_key, total=total):
+            _cleanup_incomplete_output(work_dir / output_path.name)
+            shutil.rmtree(work_dir, ignore_errors=True)
+            reusable_manifest = None
+    work_dir.mkdir(parents=True, exist_ok=True)
     frames_dir = work_dir / "frames"
     temp_output_path = work_dir / output_path.name
     frames_dir.mkdir(parents=True, exist_ok=True)
+    _cleanup_incomplete_output(temp_output_path)
 
     try:
         _raise_if_cancel_requested(cancel_event, message="视频导出已中断，尚未开始渲染。")
 
         first_job = jobs[0]
-        _emit_progress(
-            progress_callback,
-            phase="render",
-            current=0,
-            total=total,
-            message=f"正在渲染首帧 1/{total}: {first_job.path.name}",
+        target_size = _manifest_target_size(reusable_manifest)
+        existing_indices = (
+            _existing_rendered_frame_indices(frames_dir, total)
+            if reusable_manifest is not None and target_size is not None
+            else set()
         )
-        _raise_if_cancel_requested(cancel_event, message="视频导出已中断，尚未开始渲染。")
-        first_frame = render_video_frame(
-            first_job,
-            template_paths=template_paths,
-            bird_box_cache=bird_box_cache,
-            bird_box_lock=bird_box_lock,
-        )
-        try:
-            _raise_if_cancel_requested(cancel_event, message="视频导出已中断，正在保留已完成帧。")
-            target_size = resolve_target_frame_size(validated, first_frame.size)
-            _save_normalized_temp_frame(
-                first_frame,
-                frames_dir / "frame_000001.png",
-                target_size,
-                background_color=validated.background_color,
+        completed_count = len(existing_indices)
+        if completed_count > 0:
+            _emit_progress(
+                progress_callback,
+                phase="render",
+                current=completed_count,
+                total=total,
+                message=f"复用已渲染帧 {completed_count}/{total} 帧。",
             )
-        finally:
-            try:
-                first_frame.close()
-            except Exception:
-                pass
-        _emit_progress(
-            progress_callback,
-            phase="render",
-            current=1,
-            total=total,
-            message=f"已渲染 1/{total} 帧: {first_job.path.name}",
-        )
 
-        remaining_jobs = jobs[1:]
-        if remaining_jobs:
-            render_workers = resolve_video_render_workers(validated.render_workers, len(remaining_jobs))
+        if 1 not in existing_indices:
+            _emit_progress(
+                progress_callback,
+                phase="render",
+                current=completed_count,
+                total=total,
+                message=f"正在渲染首帧 1/{total}: {first_job.path.name}",
+            )
+            _raise_if_cancel_requested(cancel_event, message="视频导出已中断，尚未开始渲染。")
+            first_frame = render_video_frame(
+                first_job,
+                template_paths=template_paths,
+                bird_box_cache=bird_box_cache,
+                bird_box_lock=bird_box_lock,
+            )
+            try:
+                _raise_if_cancel_requested(cancel_event, message="视频导出已中断，正在保留已完成帧。")
+                if target_size is None:
+                    target_size = resolve_target_frame_size(validated, first_frame.size)
+                _save_normalized_temp_frame(
+                    first_frame,
+                    frames_dir / "frame_000001.png",
+                    target_size,
+                    background_color=validated.background_color,
+                )
+                _write_render_manifest(work_dir, cache_key=cache_key, target_size=target_size, total=total)
+            finally:
+                try:
+                    first_frame.close()
+                except Exception:
+                    pass
+            existing_indices.add(1)
+            completed_count += 1
+            _emit_progress(
+                progress_callback,
+                phase="render",
+                current=completed_count,
+                total=total,
+                message=f"已渲染 {completed_count}/{total} 帧: {first_job.path.name}",
+            )
+        elif target_size is not None:
+            _write_render_manifest(work_dir, cache_key=cache_key, target_size=target_size, total=total)
+
+        if target_size is None:
+            raise RuntimeError("无法确定视频输出帧尺寸。")
+
+        missing_jobs = [
+            (index, job)
+            for index, job in enumerate(jobs, start=1)
+            if index not in existing_indices
+        ]
+        if missing_jobs:
+            render_workers = resolve_video_render_workers(validated.render_workers, len(missing_jobs))
             _log.info(
-                "video export parallel render workers=%s remaining_frames=%s target_size=%sx%s",
+                "video export parallel render workers=%s missing_frames=%s reused=%s target_size=%sx%s",
                 render_workers,
-                len(remaining_jobs),
+                len(missing_jobs),
+                len(existing_indices),
                 target_size[0],
                 target_size[1],
             )
             _emit_progress(
                 progress_callback,
                 phase="render",
-                current=1,
+                current=completed_count,
                 total=total,
-                message=f"正在并行渲染剩余 {len(remaining_jobs)} 帧，线程数 {render_workers}",
+                message=f"正在并行渲染剩余 {len(missing_jobs)} 帧，线程数 {render_workers}",
             )
-            completed_count = 1
             executor = ThreadPoolExecutor(max_workers=render_workers, thread_name_prefix="birdstamp-video-render")
             futures: dict[Any, tuple[int, str]] = {}
             try:
-                for index, job in enumerate(remaining_jobs, start=2):
+                for index, job in missing_jobs:
+                    if index == 1:
+                        continue
                     _raise_if_cancel_requested(cancel_event, message="视频导出已中断，正在停止剩余帧渲染。")
                     future = executor.submit(
                         _render_and_save_video_frame,
@@ -1121,6 +1284,7 @@ def export_video(
                             pending.cancel()
                         raise
                     completed_count += 1
+                    existing_indices.add(_index)
                     _emit_progress(
                         progress_callback,
                         phase="render",
@@ -1131,6 +1295,14 @@ def export_video(
                     _raise_if_cancel_requested(cancel_event, message="视频导出已中断，正在停止剩余帧渲染。")
             finally:
                 executor.shutdown(wait=True, cancel_futures=True)
+        else:
+            _emit_progress(
+                progress_callback,
+                phase="render",
+                current=total,
+                total=total,
+                message=f"已准备 {total}/{total} 帧，开始编码视频。",
+            )
 
         _raise_if_cancel_requested(cancel_event, message="视频导出已中断，正在停止视频编码。")
         _emit_progress(
@@ -1156,7 +1328,8 @@ def export_video(
             total=total,
             message=f"视频导出完成: {output_path}",
         )
-        shutil.rmtree(work_dir, ignore_errors=True)
+        if not validated.preserve_temp_files:
+            shutil.rmtree(work_dir, ignore_errors=True)
         return output_path
     except VideoExportCancelledError:
         _cleanup_incomplete_output(temp_output_path)
@@ -1199,7 +1372,8 @@ def export_video(
         ) from None
     except Exception:
         _cleanup_incomplete_output(temp_output_path)
-        shutil.rmtree(work_dir, ignore_errors=True)
+        if not validated.preserve_temp_files:
+            shutil.rmtree(work_dir, ignore_errors=True)
         raise
 
 

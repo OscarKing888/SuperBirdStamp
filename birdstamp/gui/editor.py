@@ -693,7 +693,7 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         _template_context.set_report_db_row_resolver(_resolver)
 
     def _setup_ui_template_output_actions(self, left_layout: QVBoxLayout) -> None:
-        """构建左侧「模板」「模板选项重载」「操作」分组 UI。"""
+        """构建左侧「模板」「模板选项重载」「导出」分组 UI。"""
         template_section_content = QWidget()
         template_section_layout = QVBoxLayout(template_section_content)
         template_section_layout.setContentsMargins(0, 0, 0, 0)
@@ -776,25 +776,15 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         template_section.set_content_widget(template_section_content)
         left_layout.addWidget(template_section)
 
-        # ── 全局选项 + 操作（合并一组） ────────────────────────────────────
-        actions_content = QWidget()
-        actions_root = QVBoxLayout(actions_content)
-        actions_root.setContentsMargins(0, 0, 0, 0)
-        actions_root.setSpacing(6)
+        # ── 导出设置 ───────────────────────────────────────────────────────
+        export_content = QWidget()
+        export_root = QVBoxLayout(export_content)
+        export_root.setContentsMargins(0, 0, 0, 0)
+        export_root.setSpacing(8)
 
-        global_form = QFormLayout()
-        global_form.setContentsMargins(0, 0, 0, 0)
-        _configure_form_layout(global_form)
-
-        self.output_format_combo = QComboBox()
-        for suffix, label in OUTPUT_FORMAT_OPTIONS:
-            self.output_format_combo.addItem(label, suffix)
-        if self.output_format_combo.count() == 0:
-            self.output_format_combo.addItem("PNG", "png")
-            self.output_format_combo.addItem("JPG", "jpg")
-        self.output_format_combo.currentIndexChanged.connect(self._on_output_settings_changed)
-        global_form.addRow("输出格式", self.output_format_combo)
-
+        global_export_group = QGroupBox("全局导出设置")
+        global_export_form = QFormLayout(global_export_group)
+        _configure_form_layout(global_export_form)
         self.draw_banner_check = QCheckBox("Banner 底")
         self.draw_banner_check.setChecked(True)
         self.draw_banner_check.toggled.connect(self._on_output_settings_changed)
@@ -812,7 +802,26 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         overlay_row_layout.addWidget(self.draw_text_check)
         overlay_row_layout.addWidget(self.draw_focus_check)
         overlay_row_layout.addStretch()
-        global_form.addRow("叠加信息", overlay_row_widget)
+        global_export_form.addRow("叠加信息", overlay_row_widget)
+        export_root.addWidget(global_export_group)
+
+        image_export_group = QGroupBox("图片导出")
+        image_export_layout = QVBoxLayout(image_export_group)
+        image_export_layout.setContentsMargins(8, 8, 8, 8)
+        image_export_layout.setSpacing(6)
+
+        image_export_form = QFormLayout()
+        image_export_form.setContentsMargins(0, 0, 0, 0)
+        _configure_form_layout(image_export_form)
+
+        self.output_format_combo = QComboBox()
+        for suffix, label in OUTPUT_FORMAT_OPTIONS:
+            self.output_format_combo.addItem(label, suffix)
+        if self.output_format_combo.count() == 0:
+            self.output_format_combo.addItem("PNG", "png")
+            self.output_format_combo.addItem("JPG", "jpg")
+        self.output_format_combo.currentIndexChanged.connect(self._on_output_settings_changed)
+        image_export_form.addRow("输出格式", self.output_format_combo)
 
         self.max_edge_combo = QComboBox()
         seen_edges: set[int] = set()
@@ -829,9 +838,8 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
             self.max_edge_combo.addItem("不限制", 0)
         self.max_edge_combo.setCurrentIndex(0)
         self.max_edge_combo.currentIndexChanged.connect(self._on_output_settings_changed)
-        global_form.addRow("最大长边", self.max_edge_combo)
-
-        actions_root.addLayout(global_form)
+        image_export_form.addRow("最大长边", self.max_edge_combo)
+        image_export_layout.addLayout(image_export_form)
 
         export_btn_row = QHBoxLayout()
         export_btn_row.setSpacing(6)
@@ -841,7 +849,8 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         export_batch_btn = QPushButton("批量导出")
         export_batch_btn.clicked.connect(self.export_all)
         export_btn_row.addWidget(export_batch_btn)
-        actions_root.addLayout(export_btn_row)
+        image_export_layout.addLayout(export_btn_row)
+        export_root.addWidget(image_export_group)
 
         self.video_export_panel = VideoExportPanel()
         self.video_export_panel.exportRequested.connect(self._start_video_export)
@@ -857,11 +866,11 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
                 )
             else:
                 self.video_export_panel.set_status_text(f"未找到 ffmpeg，目标: {preferred_ffmpeg_binary_path()}")
-        actions_root.addWidget(self.video_export_panel)
+        export_root.addWidget(self.video_export_panel)
 
-        actions_section = CollapsibleSection("操作", expanded=True)
-        actions_section.set_content_widget(actions_content)
-        left_layout.addWidget(actions_section)
+        export_section = CollapsibleSection("导出", expanded=True)
+        export_section.set_content_widget(export_content)
+        left_layout.addWidget(export_section)
 
     def _setup_ui_preview_panel(self) -> QWidget:
         """构建右侧「预览区」UI，返回该面板 QWidget。"""
@@ -1203,7 +1212,7 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
     def _on_output_settings_changed(self, *_args: Any) -> None:
         if self.current_path is not None and not self._is_placeholder_active():
             key = _path_key(self.current_path)
-            snapshot = self._clone_render_settings(self._build_current_render_settings())
+            snapshot = self._photo_override_settings_from_snapshot(self._build_current_render_settings())
             self.photo_render_overrides[key] = snapshot
             self._update_photo_list_item_display(self.current_path, settings=snapshot)
             self._invalidate_original_mode_cache()
@@ -1931,7 +1940,7 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
                 continue
             existing_keys.add(key)
 
-            current_settings = self._clone_render_settings(default_settings)
+            current_settings = self._photo_override_settings_from_snapshot(default_settings)
             self.photo_render_overrides[key] = current_settings
             item = PhotoListItem(["", "", "", "", "", "", ""])
             sequence_value = self._next_photo_sequence_value()
@@ -2280,6 +2289,7 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
                 frame_size_mode=request.frame_size_mode,
                 frame_width=request.frame_width,
                 frame_height=request.frame_height,
+                preserve_temp_files=request.preserve_temp_files,
             )
             output_path = options.normalized_output_path()
             if not self._confirm_video_output_overwrite(output_path):
@@ -2345,7 +2355,7 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
             self._set_status("请先选择要应用设置的照片。")
             return
 
-        snapshot = self._build_current_render_settings()
+        snapshot = self._photo_override_settings_from_snapshot(self._build_current_render_settings())
         for path in targets:
             normalized = self._clone_render_settings(snapshot)
             self.photo_render_overrides[_path_key(path)] = normalized
@@ -2364,7 +2374,7 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
             self._set_status("照片列表为空。")
             return
 
-        snapshot = self._build_current_render_settings()
+        snapshot = self._photo_override_settings_from_snapshot(self._build_current_render_settings())
         for path in targets:
             normalized = self._clone_render_settings(snapshot)
             self.photo_render_overrides[_path_key(path)] = normalized

@@ -340,6 +340,14 @@ class _BirdStampRendererMixin:
             ),
         }
 
+    def _photo_override_settings_from_snapshot(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """照片级 override 只保留逐图渲染参数，不包含全局导出开关。"""
+        normalized = self._clone_render_settings(settings)
+        normalized.pop("draw_banner", None)
+        normalized.pop("draw_text", None)
+        normalized.pop("draw_focus", None)
+        return normalized
+
     def _clone_render_settings(self, settings: dict[str, Any]) -> dict[str, Any]:
         template_name = str(settings.get("template_name") or "default").strip() or "default"
         template_payload_raw = settings.get("template_payload")
@@ -398,16 +406,6 @@ class _BirdStampRendererMixin:
         payload_raw = raw.get("template_payload")
         if isinstance(payload_raw, dict):
             settings["template_payload"] = _normalize_template_payload(payload_raw, fallback_name=template_name)
-        if "draw_banner" in raw:
-            settings["draw_banner"] = _parse_bool_value(raw.get("draw_banner"), settings["draw_banner"])
-        if "draw_text" in raw:
-            settings["draw_text"] = _parse_bool_value(raw.get("draw_text"), settings["draw_text"])
-        if "draw_focus" in raw:
-            settings["draw_focus"] = _parse_bool_value(raw.get("draw_focus"), settings["draw_focus"])
-        if "draw_template_overlay" in raw and "draw_banner" not in raw and "draw_text" not in raw:
-            legacy = _parse_bool_value(raw.get("draw_template_overlay"), True)
-            settings["draw_banner"] = legacy
-            settings["draw_text"] = legacy
 
         ratio_raw = raw.get("ratio")
         if ratio_raw is None or ratio_raw == "":
@@ -477,7 +475,7 @@ class _BirdStampRendererMixin:
         template_name = str(normalized["template_name"])
 
         widgets_to_block = [
-            self.template_combo, self.draw_banner_check, self.draw_text_check, self.draw_focus_check,
+            self.template_combo,
             self.ratio_combo, self.center_mode_combo,
             self.max_edge_combo,
         ]
@@ -487,9 +485,6 @@ class _BirdStampRendererMixin:
             template_idx = self.template_combo.findText(template_name)
             if template_idx >= 0:
                 self.template_combo.setCurrentIndex(template_idx)
-            self.draw_banner_check.setChecked(bool(normalized.get("draw_banner", True)))
-            self.draw_text_check.setChecked(bool(normalized.get("draw_text", True)))
-            self.draw_focus_check.setChecked(bool(normalized.get("draw_focus", False)))
 
             ratio_idx = self._ratio_combo_index_for_value(normalized["ratio"])
             if ratio_idx >= 0:
