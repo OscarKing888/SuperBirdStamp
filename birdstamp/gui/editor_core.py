@@ -21,11 +21,17 @@ from app_common.focus_calc import (
 )
 from birdstamp.config import resolve_bundled_path
 
+try:
+    from birdstamp.gui.editor_options import RATIO_FREE
+except ImportError:
+    RATIO_FREE = "free"  # fallback when GUI not available (e.g. CLI)
+
 # Center mode constants (used by CLI and GUI)
 CENTER_MODE_IMAGE = "image"
 CENTER_MODE_FOCUS = "focus"
 CENTER_MODE_BIRD = "bird"
-CENTER_MODE_OPTIONS = (CENTER_MODE_IMAGE, CENTER_MODE_FOCUS, CENTER_MODE_BIRD)
+CENTER_MODE_CUSTOM = "custom"
+CENTER_MODE_OPTIONS = (CENTER_MODE_IMAGE, CENTER_MODE_FOCUS, CENTER_MODE_BIRD, CENTER_MODE_CUSTOM)
 
 DEFAULT_CROP_PADDING_PX = 128
 DEFAULT_FOCUS_BOX_SHORT_EDGE_RATIO = 0.12
@@ -757,9 +763,12 @@ def pad_image(
     return ImageOps.expand(image, border=(left, top, right, bottom), fill=fill_color)
 
 
-def parse_ratio_value(value: Any) -> float | None:
+def parse_ratio_value(value: Any) -> float | None | str:
+    """Return ratio as float, None (original aspect), or RATIO_FREE (no aspect lock)."""
     if value is None:
         return None
+    if value is RATIO_FREE or (isinstance(value, str) and str(value).strip().lower() == "free"):
+        return RATIO_FREE
     try:
         ratio = float(value)
     except Exception:
@@ -767,6 +776,11 @@ def parse_ratio_value(value: Any) -> float | None:
     if ratio <= 0:
         return None
     return ratio
+
+
+def is_ratio_free(ratio: Any) -> bool:
+    """True when ratio is the free-aspect sentinel (no constraint on 9-grid crop)."""
+    return ratio is RATIO_FREE or ratio == RATIO_FREE
 
 
 def parse_bool_value(value: Any, default: bool = False) -> bool:
@@ -918,6 +932,47 @@ def crop_box_has_effect(crop_box: tuple[float, float, float, float] | None) -> b
         or normalized[2] < (1.0 - eps)
         or normalized[3] < (1.0 - eps)
     )
+
+
+def constrain_box_to_ratio(
+    box: tuple[float, float, float, float],
+    ratio: float | None,
+    width: int,
+    height: int,
+) -> tuple[float, float, float, float]:
+    """Return a normalized box with the same center but crop aspect in pixels = ratio, clamped to [0,1].
+    In normalized space (r-l)/(b-t) must equal ratio*height/width so that (r-l)*width/((b-t)*height)=ratio.
+    When ratio is None, use image aspect. When ratio is RATIO_FREE, return box unchanged.
+    """
+    if is_ratio_free(ratio) or width <= 0 or height <= 0:
+        return normalize_unit_box(box) or box
+    # Pixel aspect R = (r-l)*W / ((b-t)*H) => (r-l)/(b-t) = R*H/W in normalized space.
+    pixel_ratio = float(ratio) if ratio is not None and ratio > 0 else width / float(height)
+    target_ratio = pixel_ratio * height / float(width) if width > 0 else pixel_ratio
+    l, t, r, b = box[0], box[1], box[2], box[3]
+    cx = (l + r) * 0.5
+    cy = (t + b) * 0.5
+    w = max(r - l, 0.0001)
+    h = max(b - t, 0.0001)
+    if w / h > target_ratio:
+        new_h = w / target_ratio
+        new_w = w
+    else:
+        new_w = h * target_ratio
+        new_h = h
+    new_l = cx - new_w * 0.5
+    new_r = cx + new_w * 0.5
+    new_t = cy - new_h * 0.5
+    new_b = cy + new_h * 0.5
+    if new_l < 0.0:
+        new_l, new_r = 0.0, new_w
+    if new_r > 1.0:
+        new_r, new_l = 1.0, 1.0 - new_w
+    if new_t < 0.0:
+        new_t, new_b = 0.0, new_h
+    if new_b > 1.0:
+        new_b, new_t = 1.0, 1.0 - new_h
+    return (clamp01(new_l), clamp01(new_t), clamp01(new_r), clamp01(new_b))
 
 
 def crop_image_by_normalized_box(
@@ -1165,27 +1220,62 @@ def detect_primary_bird_box(image: Image.Image) -> tuple[float, float, float, fl
     return _normalize_xyxy_box(best_box, source.width, source.height)
 
 
+def _crop_plan_from_override(
+    width: int,
+    height: int,
+    crop_box: tuple[float, float, float, float],
+) -> tuple[tuple[float, float, float, float], tuple[int, int, int, int]]:
+    """From a normalized crop box (may extend outside 0-1), compute padded-image box and outer_pad."""
+    import math as _math
+    l, t, r, b = crop_box[0], crop_box[1], crop_box[2], crop_box[3]
+    pad_l = max(0, int(_math.ceil(-l * width)))
+    pad_r = max(0, int(_math.ceil(r * width - width)))
+    pad_t = max(0, int(_math.ceil(-t * height)))
+    pad_b = max(0, int(_math.ceil(b * height - height)))
+    pw = width + pad_l + pad_r
+    ph = height + pad_t + pad_b
+    if pw <= 0 or ph <= 0:
+        return ((0.0, 0.0, 1.0, 1.0), (0, 0, 0, 0))
+    x1 = pad_l + l * width
+    y1 = pad_t + t * height
+    x2 = pad_l + r * width
+    y2 = pad_t + b * height
+    box_norm = (
+        x1 / pw,
+        y1 / ph,
+        x2 / pw,
+        y2 / ph,
+    )
+    return (box_norm, (pad_t, pad_b, pad_l, pad_r))
+
+
 def compute_crop_plan(
     image: Image.Image,
     raw_metadata: dict[str, Any],
     *,
-    ratio: float | None,
+    ratio: float | None | str,
     center_mode: str,
     camera_type: CameraFocusType | str | None = None,
     inner_top: int = 0,
     inner_bottom: int = 0,
     inner_left: int = 0,
     inner_right: int = 0,
+    crop_box_override: tuple[float, float, float, float] | None = None,
 ) -> tuple[tuple[float, float, float, float] | None, tuple[int, int, int, int]]:
     """Compute (crop_box, outer_pad) using the same logic as the main editor's pipeline.
 
     Returns the normalised crop box (0-1 coordinates) and the outer padding
     (top, bottom, left, right) in pixels that must be added to the image *before*
     applying the crop. Matches ``_BirdStampCropCalculatorMixin._compute_crop_plan_for_image``.
+    When crop_box_override is provided and effective, it is used and outer_pad is derived from it.
+    When ratio is RATIO_FREE and no override, returns (None, (0,0,0,0)).
     """
-    if ratio is None:
-        return (None, (0, 0, 0, 0))
     w, h = image.size
+    if crop_box_override is not None and crop_box_has_effect(crop_box_override):
+        box_norm, outer_pad = _crop_plan_from_override(w, h, crop_box_override)
+        return (box_norm, outer_pad)
+    if is_ratio_free(ratio) or ratio is None:
+        return (None, (0, 0, 0, 0))
     center_mode = normalize_center_mode(center_mode)
     anchor: tuple[float, float] = (0.5, 0.5)
     keep_box: tuple[float, float, float, float] | None = None

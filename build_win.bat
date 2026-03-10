@@ -29,7 +29,7 @@ if errorlevel 1 (
 "%PYTHON_EXE%" -m PyInstaller ^
   --noconfirm ^
   --clean ^
-  SuperViewer_win.spec
+  BirdStamp_win.spec
 goto :after_build
 
 :build_with_launcher
@@ -42,7 +42,7 @@ if errorlevel 1 (
 py -3 -m PyInstaller ^
   --noconfirm ^
   --clean ^
-  SuperViewer_win.spec
+  BirdStamp_win.spec
 goto :after_build
 
 :build_with_python
@@ -55,7 +55,7 @@ if errorlevel 1 (
 python -m PyInstaller ^
   --noconfirm ^
   --clean ^
-  SuperViewer_win.spec
+  BirdStamp_win.spec
 
 :after_build
 if errorlevel 1 goto :end

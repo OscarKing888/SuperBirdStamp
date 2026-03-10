@@ -7,11 +7,14 @@
   ],
   "ratio_options": [    
     {"label": "9:16", "value": 0.5625},
-    {"label": "16:9", "value": 1.7777777778},
-    {"label": "原比例", "value": null},
-    {"label": "1:1", "value": 1.0},
+    {"label": "16:9", "value": 1.7777777778},    
+    {"label": "19.5:9", "value": 2.1666666667},    
+    {"label": "9:19.5", "value": 0.4615384615},
     {"label": "4:3", "value": 1.3333333333},
-    {"label": "3:4", "value": 0.75}
+    {"label": "3:4", "value": 0.75},
+    {"label": "1:1", "value": 1.0},
+    {"label": "原比例", "value": null},
+    {"label": "自由", "value": "free"}
   ],
   "max_long_edge_options": [0, 1920, 2560, 3840],
   "output_format_options": [
@@ -36,11 +39,13 @@
     {"value": "portrait", "label": "竖屏"}
   ],
   "video_frame_size_options": [
-    {"label": "首帧尺寸", "mode": "auto"},
+    {"label": "保持照片大小", "mode": "auto"},
+    {"label": "iPhone全屏 4K (4680 x 2160)", "mode": "preset", "width": 4680, "height": 2160},
     {"label": "4K UHD (3840 x 2160)", "mode": "preset", "width": 3840, "height": 2160},
     {"label": "2K / 1440p (2560 x 1440)", "mode": "preset", "width": 2560, "height": 1440},
     {"label": "Full HD / 1080p (1920 x 1080)", "mode": "preset", "width": 1920, "height": 1080},
     {"label": "HD / 720p (1280 x 720)", "mode": "preset", "width": 1280, "height": 720},
+    {"label": "方形 1080 (1080 x 1080)", "mode": "preset", "width": 1080, "height": 1080},
     {"label": "方形 1080 (1080 x 1080)", "mode": "preset", "width": 1080, "height": 1080},
     {"label": "自定义", "mode": "custom"}
   ],

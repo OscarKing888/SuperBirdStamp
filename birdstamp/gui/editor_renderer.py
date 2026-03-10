@@ -31,6 +31,7 @@ _transform_source_box_after_crop_padding = editor_core.transform_source_box_afte
 _normalize_center_mode              = editor_core.normalize_center_mode
 _parse_bool_value                   = editor_core.parse_bool_value
 _parse_ratio_value                  = editor_core.parse_ratio_value
+_is_ratio_free                      = editor_core.is_ratio_free
 _parse_padding_value                = editor_core.parse_padding_value
 _pad_image                          = editor_core.pad_image
 _resize_fit                         = editor_core.resize_fit
@@ -47,6 +48,7 @@ _render_template_overlay_in_crop_region = editor_template.render_template_overla
 _DEFAULT_TEMPLATE_CENTER_MODE       = editor_template.DEFAULT_TEMPLATE_CENTER_MODE
 _DEFAULT_TEMPLATE_MAX_LONG_EDGE     = editor_template.DEFAULT_TEMPLATE_MAX_LONG_EDGE
 _DEFAULT_CROP_PADDING_PX            = editor_core.DEFAULT_CROP_PADDING_PX
+RATIO_FREE                          = editor_options.RATIO_FREE
 OUTPUT_FORMAT_OPTIONS               = editor_options.OUTPUT_FORMAT_OPTIONS
 
 
@@ -84,6 +86,16 @@ class _BirdStampRendererMixin:
     def _apply_preview_overlay_options_from_ui(self) -> None:
         """Apply preview overlay options to the preview canvas/composite."""
         self.preview_label.apply_overlay_options(self._build_preview_overlay_options())
+        canvas = self.preview_label.canvas
+        if hasattr(canvas, "set_crop_edit_mode"):
+            crop_edit = getattr(self, "crop_edit_mode_check", None)
+            canvas.set_crop_edit_mode(crop_edit.isChecked() if crop_edit else False)
+        if hasattr(canvas, "set_crop_ratio_constraint"):
+            r = self._selected_ratio()
+            canvas.set_crop_ratio_constraint(
+                r if (r is not None and not _is_ratio_free(r)) else None,
+                _is_ratio_free(r),
+            )
 
     def _source_signature(self, path: Path) -> str:
         try:
@@ -321,6 +333,8 @@ class _BirdStampRendererMixin:
     def _build_current_render_settings(self) -> dict[str, Any]:
         template_name = str(self.template_combo.currentText() or "default").strip() or "default"
         template_payload = _normalize_template_payload(self.current_template_payload, fallback_name=template_name)
+        center_mode = self._selected_center_mode()
+        custom_center = getattr(self, "_custom_center", None)
         return {
             "template_name": template_name,
             "template_payload": _deep_copy_payload(template_payload),
@@ -328,7 +342,7 @@ class _BirdStampRendererMixin:
             "draw_text": bool(self.draw_text_check.isChecked()),
             "draw_focus": bool(self.draw_focus_check.isChecked()),
             "ratio": self._selected_ratio(),
-            "center_mode": self._selected_center_mode(),
+            "center_mode": center_mode,
             "max_long_edge": self._selected_max_long_edge(),
             "crop_padding_top": self._padding_widget_value(self.crop_padding_top),
             "crop_padding_bottom": self._padding_widget_value(self.crop_padding_bottom),
@@ -338,6 +352,9 @@ class _BirdStampRendererMixin:
                 str(self.crop_padding_fill_combo.currentData() or "#FFFFFF"),
                 "#FFFFFF",
             ),
+            "crop_box": getattr(self, "_crop_box_override", None),
+            "custom_center_x": float(custom_center[0]) if center_mode == _CENTER_MODE_CUSTOM and custom_center else None,
+            "custom_center_y": float(custom_center[1]) if center_mode == _CENTER_MODE_CUSTOM and custom_center else None,
         }
 
     def _photo_override_settings_from_snapshot(self, settings: dict[str, Any]) -> dict[str, Any]:
@@ -356,17 +373,7 @@ class _BirdStampRendererMixin:
         else:
             template_payload = _default_template_payload(name=template_name)
 
-        ratio: float | None
-        ratio_raw = settings.get("ratio")
-        if ratio_raw is None:
-            ratio = None
-        else:
-            try:
-                ratio = float(ratio_raw)
-            except Exception:
-                ratio = None
-            if ratio is not None and ratio <= 0:
-                ratio = None
+        ratio = _parse_ratio_value(settings.get("ratio"))
 
         max_long_edge = 0
         try:
@@ -380,6 +387,8 @@ class _BirdStampRendererMixin:
 
         fill = _safe_color(str(settings.get("crop_padding_fill", "#FFFFFF")), "#FFFFFF")
 
+        custom_center_x = settings.get("custom_center_x")
+        custom_center_y = settings.get("custom_center_y")
         return {
             "template_name": template_name,
             "template_payload": _deep_copy_payload(template_payload),
@@ -394,6 +403,9 @@ class _BirdStampRendererMixin:
             "crop_padding_left": _pad_px("crop_padding_left"),
             "crop_padding_right": _pad_px("crop_padding_right"),
             "crop_padding_fill": fill,
+            "crop_box": settings.get("crop_box"),
+            "custom_center_x": float(custom_center_x) if custom_center_x is not None else None,
+            "custom_center_y": float(custom_center_y) if custom_center_y is not None else None,
         }
 
     def _normalize_render_settings(self, raw: Any, fallback: dict[str, Any]) -> dict[str, Any]:
@@ -411,15 +423,31 @@ class _BirdStampRendererMixin:
         if ratio_raw is None or ratio_raw == "":
             settings["ratio"] = None
         else:
-            try:
-                ratio = float(ratio_raw)
-            except Exception:
-                ratio = settings["ratio"]
-            else:
-                settings["ratio"] = ratio if ratio > 0 else None
+            parsed = _parse_ratio_value(ratio_raw)
+            settings["ratio"] = parsed
 
+        if "crop_box" in raw:
+            cb = raw.get("crop_box")
+            if cb is not None and isinstance(cb, (list, tuple)) and len(cb) == 4:
+                try:
+                    settings["crop_box"] = (float(cb[0]), float(cb[1]), float(cb[2]), float(cb[3]))
+                except (TypeError, ValueError):
+                    settings["crop_box"] = settings.get("crop_box")
+            else:
+                settings["crop_box"] = None
         if "center_mode" in raw:
             settings["center_mode"] = _normalize_center_mode(raw.get("center_mode"))
+
+        if "custom_center_x" in raw:
+            try:
+                settings["custom_center_x"] = float(raw.get("custom_center_x"))
+            except Exception:
+                settings["custom_center_x"] = settings.get("custom_center_x")
+        if "custom_center_y" in raw:
+            try:
+                settings["custom_center_y"] = float(raw.get("custom_center_y"))
+            except Exception:
+                settings["custom_center_y"] = settings.get("custom_center_y")
 
         if "max_long_edge" in raw:
             try:
@@ -447,12 +475,18 @@ class _BirdStampRendererMixin:
             return fallback
         return self._normalize_render_settings(self.photo_render_overrides.get(key), fallback=fallback)
 
-    def _ratio_combo_index_for_value(self, ratio: float | None) -> int:
+    def _ratio_combo_index_for_value(self, ratio: Any) -> int:
         for idx in range(self.ratio_combo.count()):
             data = self.ratio_combo.itemData(idx)
             if data is None and ratio is None:
                 return idx
+            if data is RATIO_FREE or data == RATIO_FREE:
+                if ratio is RATIO_FREE or ratio == RATIO_FREE:
+                    return idx
+                continue
             if data is None or ratio is None:
+                continue
+            if ratio is RATIO_FREE or ratio == RATIO_FREE:
                 continue
             try:
                 if abs(float(data) - float(ratio)) <= 0.0001:

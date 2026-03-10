@@ -7,6 +7,9 @@ from typing import Any
 
 from birdstamp.config import resolve_bundled_path
 
+# Sentinel for "free aspect ratio" in crop (no ratio lock when dragging 9-grid).
+RATIO_FREE = "free"
+
 _FALLBACK_STYLE_OPTIONS = ("normal",)
 _FALLBACK_RATIO_OPTIONS: list[tuple[str, float | None]] = [("原比例", None)]
 _FALLBACK_MAX_LONG_EDGE_OPTIONS = [0]
@@ -57,10 +60,10 @@ def _normalize_style_options(value: Any) -> tuple[str, ...]:
     return tuple(items) if items else _FALLBACK_STYLE_OPTIONS
 
 
-def _normalize_ratio_options(value: Any) -> list[tuple[str, float | None]]:
+def _normalize_ratio_options(value: Any) -> list[tuple[str, float | None | str]]:
     if not isinstance(value, list):
         return list(_FALLBACK_RATIO_OPTIONS)
-    items: list[tuple[str, float | None]] = []
+    items: list[tuple[str, float | None | str]] = []
     for item in value:
         if not isinstance(item, dict):
             continue
@@ -68,9 +71,11 @@ def _normalize_ratio_options(value: Any) -> list[tuple[str, float | None]]:
         if not label:
             continue
         ratio_raw = item.get("value")
-        ratio: float | None
+        ratio: float | None | str
         if ratio_raw is None:
             ratio = None
+        elif isinstance(ratio_raw, str) and str(ratio_raw).strip().lower() == "free":
+            ratio = RATIO_FREE
         else:
             try:
                 ratio = float(ratio_raw)
@@ -306,7 +311,7 @@ def load_editor_options() -> dict[str, Any]:
 
 _EDITOR_OPTIONS = load_editor_options()
 STYLE_OPTIONS: tuple[str, ...] = _EDITOR_OPTIONS["style_options"]
-RATIO_OPTIONS: list[tuple[str, float | None]] = _EDITOR_OPTIONS["ratio_options"]
+RATIO_OPTIONS: list[tuple[str, float | None | str]] = _EDITOR_OPTIONS["ratio_options"]
 MAX_LONG_EDGE_OPTIONS: list[int] = _EDITOR_OPTIONS["max_long_edge_options"]
 OUTPUT_FORMAT_OPTIONS: list[tuple[str, str]] = _EDITOR_OPTIONS["output_format_options"]
 VIDEO_CONTAINER_OPTIONS: list[tuple[str, str]] = _EDITOR_OPTIONS["video_container_options"]

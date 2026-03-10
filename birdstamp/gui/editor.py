@@ -153,6 +153,7 @@ _DEFAULT_CROP_PADDING_PX = editor_core.DEFAULT_CROP_PADDING_PX
 _CENTER_MODE_IMAGE = editor_core.CENTER_MODE_IMAGE
 _CENTER_MODE_FOCUS = editor_core.CENTER_MODE_FOCUS
 _CENTER_MODE_BIRD = editor_core.CENTER_MODE_BIRD
+_CENTER_MODE_CUSTOM = editor_core.CENTER_MODE_CUSTOM
 _CENTER_MODE_OPTIONS = editor_core.CENTER_MODE_OPTIONS
 _DEFAULT_TEMPLATE_BANNER_COLOR = editor_utils.DEFAULT_TEMPLATE_BANNER_COLOR
 _TEMPLATE_BANNER_COLOR_NONE = editor_utils.TEMPLATE_BANNER_COLOR_NONE
@@ -212,6 +213,8 @@ _box_center = editor_core.box_center
 _solve_axis_crop_start = editor_core.solve_axis_crop_start
 _compute_ratio_crop_box = editor_core.compute_ratio_crop_box
 _crop_box_has_effect = editor_core.crop_box_has_effect
+_constrain_box_to_ratio = editor_core.constrain_box_to_ratio
+_is_ratio_free = editor_core.is_ratio_free
 _crop_image_by_normalized_box = editor_core.crop_image_by_normalized_box
 _detect_primary_bird_box = editor_core.detect_primary_bird_box
 _load_sidecar_xmp_metadata = editor_core.load_sidecar_xmp_metadata
@@ -721,13 +724,14 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         self.ratio_combo = QComboBox()
         for label, ratio in RATIO_OPTIONS:
             self.ratio_combo.addItem(label, ratio)
-        self.ratio_combo.currentIndexChanged.connect(self._on_crop_settings_changed)
+        self.ratio_combo.currentIndexChanged.connect(self._on_ratio_changed)
         override_form.addRow("裁切比例", self.ratio_combo)
 
         self.center_mode_combo = QComboBox()
         self.center_mode_combo.addItem("鸟体", _CENTER_MODE_BIRD)
         self.center_mode_combo.addItem("焦点", _CENTER_MODE_FOCUS)
         self.center_mode_combo.addItem("图像中心", _CENTER_MODE_IMAGE)
+        self.center_mode_combo.addItem("自定义", _CENTER_MODE_CUSTOM)
         self.center_mode_combo.currentIndexChanged.connect(self._on_crop_settings_changed)
         override_form.addRow("裁切中心", self.center_mode_combo)
 
@@ -891,6 +895,11 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         self.show_crop_effect_check.toggled.connect(self._on_preview_toolbar_toggled)
         preview_toolbar.addWidget(self.show_crop_effect_check)
 
+        self.crop_edit_mode_check = QCheckBox("调整裁剪框")
+        self.crop_edit_mode_check.setToolTip("在预览上拖动 9 宫格手柄调整裁剪范围；比例由「裁切比例」锁定（选「自由」时不锁定）")
+        self.crop_edit_mode_check.toggled.connect(self._on_preview_toolbar_toggled)
+        preview_toolbar.addWidget(self.crop_edit_mode_check)
+
         self.crop_effect_alpha_label = QLabel("Alpha")
         preview_toolbar.addWidget(self.crop_effect_alpha_label)
 
@@ -921,6 +930,11 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
 
         self.preview_label = PreviewWithStatusBar(canvas=EditorPreviewCanvas())
         self.preview_label.setObjectName("PreviewLabel")
+        self._crop_box_override: tuple[float, float, float, float] | None = None
+        self._custom_center: tuple[float, float] | None = None
+        canvas = self.preview_label.canvas
+        if hasattr(canvas, "crop_box_changed"):
+            canvas.crop_box_changed.connect(self._on_canvas_crop_box_changed)
         right_layout.addWidget(self.preview_label, stretch=1)
 
         return right_panel
@@ -1186,6 +1200,73 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
     def _on_preview_toolbar_toggled(self, _checked: bool) -> None:
         self._refresh_preview_label(preserve_view=True)
 
+    def _on_canvas_crop_box_changed(self, box: tuple[float, float, float, float]) -> None:
+        """9 宫格裁切框变更。
+
+        - 若当前裁切框尚未平移（仅缩放），则根据图像尺寸反算 top/bottom/left/right padding。
+        - 若已经发生过平移，则将裁切中心改为自定义，并记录 custom_center_x/y。
+        """
+        canvas = self.preview_label.canvas
+        has_pan = False
+        if hasattr(canvas, "has_pan"):
+            try:
+                has_pan = bool(canvas.has_pan())  # type: ignore[call-arg]
+            except Exception:
+                has_pan = False
+
+        if self.current_source_image is not None:
+            if not has_pan:
+                self._update_crop_padding_from_box(box, self.current_source_image.size)
+            else:
+                self._set_custom_center_from_box(box)
+
+        self._crop_box_override = box
+        self._on_crop_settings_changed()
+
+    def _update_crop_padding_from_box(
+        self,
+        box: tuple[float, float, float, float],
+        image_size: tuple[int, int],
+    ) -> None:
+        """按照当前裁切框在整张图中的位置，更新四向 padding 数值（像素）。"""
+        try:
+            width, height = image_size
+        except Exception:
+            return
+        if width <= 0 or height <= 0:
+            return
+        l, t, r, b = box
+        top_px = int(round(t * height))
+        bottom_px = int(round((1.0 - b) * height))
+        left_px = int(round(l * width))
+        right_px = int(round((1.0 - r) * width))
+        # 同步到 UI widget（不走 changed 信号，避免递归）
+        self._crop_padding_widget.set_values(
+            top=top_px,
+            bottom=bottom_px,
+            left=left_px,
+            right=right_px,
+            fill=_safe_color(
+                str(self.crop_padding_fill_combo.currentData() or "#FFFFFF"),
+                "#FFFFFF",
+            ),
+        )
+
+    def _set_custom_center_from_box(self, box: tuple[float, float, float, float]) -> None:
+        """从裁切框中心推导自定义裁切中心，并切换到 CENTER_MODE_CUSTOM。"""
+        cx = float((box[0] + box[2]) * 0.5)
+        cy = float((box[1] + box[3]) * 0.5)
+        self._custom_center = (cx, cy)
+        # 切换中心模式到自定义
+        for idx in range(self.center_mode_combo.count()):
+            if self.center_mode_combo.itemData(idx) == _CENTER_MODE_CUSTOM:
+                self.center_mode_combo.blockSignals(True)
+                try:
+                    self.center_mode_combo.setCurrentIndex(idx)
+                finally:
+                    self.center_mode_combo.blockSignals(False)
+                break
+
     def _on_preview_scale_mode_toggled(self, _checked: bool) -> None:
         self._refresh_preview_label(preserve_view=True)
 
@@ -1199,6 +1280,24 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
 
     def _sync_crop_padding_spin_from_slider(self, spin: QSpinBox, value: int) -> None:
         self._crop_padding_widget._sync_spin(spin, value)
+
+    def _on_ratio_changed(self, *_args: Any) -> None:
+        """裁切比例变更：使当前裁切框与新区比例一致（按中心约束），再走 settings 流程。"""
+        new_ratio = self._selected_ratio()
+        if (
+            not _is_ratio_free(new_ratio)
+            and self._crop_box_override is not None
+            and self.current_source_image is not None
+        ):
+            w, h = self.current_source_image.size
+            if w > 0 and h > 0:
+                self._crop_box_override = _constrain_box_to_ratio(
+                    self._crop_box_override,
+                    new_ratio,
+                    w,
+                    h,
+                )
+        self._on_crop_settings_changed(*_args)
 
     def _on_crop_settings_changed(self, *_args: Any) -> None:
         """裁切相关选项变更：标记需要全图视图，然后走普通 settings 流程。"""
@@ -1322,6 +1421,14 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
             right=_parse_padding_value(p.get("crop_padding_right", _DEFAULT_CROP_PADDING_PX), _DEFAULT_CROP_PADDING_PX),
             fill=_safe_color(str(p.get("crop_padding_fill", "#FFFFFF")), "#FFFFFF"),
         )
+        cb = p.get("crop_box")
+        if cb is not None and isinstance(cb, (list, tuple)) and len(cb) == 4:
+            try:
+                self._crop_box_override = (float(cb[0]), float(cb[1]), float(cb[2]), float(cb[3]))
+            except (TypeError, ValueError):
+                self._crop_box_override = None
+        else:
+            self._crop_box_override = None
 
     def _apply_template_output_settings_to_main_output(self) -> None:
         """将模板中的裁切策略 / 裁切中心 / 最大长边应用到主界面控件。"""

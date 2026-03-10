@@ -21,6 +21,8 @@ _pad_image                          = editor_core.pad_image
 _solve_axis_crop_start              = editor_core.solve_axis_crop_start
 _compute_ratio_crop_box             = editor_core.compute_ratio_crop_box
 _crop_box_has_effect                = editor_core.crop_box_has_effect
+_crop_plan_from_override            = editor_core._crop_plan_from_override
+_is_ratio_free                      = editor_core.is_ratio_free
 _normalize_unit_box                 = editor_core.normalize_unit_box
 _box_center                         = editor_core.box_center
 _expand_unit_box_to_unclamped_pixels = editor_core.expand_unit_box_to_unclamped_pixels
@@ -32,6 +34,8 @@ _resolve_focus_camera_type_from_metadata = editor_core.resolve_focus_camera_type
 _CENTER_MODE_BIRD                   = editor_core.CENTER_MODE_BIRD
 _CENTER_MODE_FOCUS                  = editor_core.CENTER_MODE_FOCUS
 _CENTER_MODE_IMAGE                  = editor_core.CENTER_MODE_IMAGE
+_CENTER_MODE_CUSTOM                 = editor_core.CENTER_MODE_CUSTOM
+RATIO_FREE                          = editor_options.RATIO_FREE
 OUTPUT_FORMAT_OPTIONS               = editor_options.OUTPUT_FORMAT_OPTIONS
 
 
@@ -98,6 +102,7 @@ class _BirdStampCropMixin:
         image: Image.Image,
         raw_metadata: dict[str, Any],
         center_mode: str,
+        settings: dict[str, Any] | None = None,
     ) -> tuple[tuple[float, float], tuple[float, float, float, float] | None]:
         focus_camera_type = _resolve_focus_camera_type_from_metadata(raw_metadata)
         focus_point = _extract_focus_point_for_display(
@@ -106,11 +111,19 @@ class _BirdStampCropMixin:
             image.height,
             camera_type=focus_camera_type,
         )
+        mode = _normalize_center_mode(center_mode)
+        if mode == _CENTER_MODE_CUSTOM and settings is not None:
+            try:
+                cx = float(settings.get("custom_center_x", 0.5))
+                cy = float(settings.get("custom_center_y", 0.5))
+            except Exception:
+                cx, cy = 0.5, 0.5
+            return ((cx, cy), None)
+
         bird_box: tuple[float, float, float, float] | None = None
         if path is not None:
             bird_box = self._bird_box_for_path(path, source_image=image)
 
-        mode = _normalize_center_mode(center_mode)
         resolver_map = {
             _CENTER_MODE_IMAGE: self._resolve_crop_targets_for_image_center,
             _CENTER_MODE_FOCUS: self._resolve_crop_targets_for_focus_center,
@@ -192,7 +205,15 @@ class _BirdStampCropMixin:
         settings: dict[str, Any],
     ) -> tuple[tuple[float, float, float, float] | None, tuple[int, int, int, int]]:
         ratio = _parse_ratio_value(settings.get("ratio"))
-        if ratio is None:
+        crop_box_raw = settings.get("crop_box")
+        if crop_box_raw is not None and isinstance(crop_box_raw, (list, tuple)) and len(crop_box_raw) == 4:
+            try:
+                cb = (float(crop_box_raw[0]), float(crop_box_raw[1]), float(crop_box_raw[2]), float(crop_box_raw[3]))
+                if _crop_box_has_effect(cb):
+                    return _crop_plan_from_override(image.width, image.height, cb)
+            except (TypeError, ValueError):
+                pass
+        if ratio is None or _is_ratio_free(ratio):
             return (None, (0, 0, 0, 0))
 
         anchor, keep_box = self._resolve_crop_anchor_and_keep_box(
@@ -200,6 +221,7 @@ class _BirdStampCropMixin:
             image=image,
             raw_metadata=raw_metadata,
             center_mode=str(settings.get("center_mode") or _CENTER_MODE_IMAGE),
+            settings=settings,
         )
 
         if keep_box is not None:
@@ -254,10 +276,12 @@ class _BirdStampCropMixin:
             settings=settings,
         )
 
-    def _selected_ratio(self) -> float | None:
+    def _selected_ratio(self) -> float | None | str:
         value = self.ratio_combo.currentData()
         if value is None:
             return None
+        if value is RATIO_FREE or value == RATIO_FREE:
+            return RATIO_FREE
         try:
             return float(value)
         except Exception:

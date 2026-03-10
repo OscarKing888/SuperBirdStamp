@@ -40,6 +40,9 @@ _build_metadata_context = editor_utils.build_metadata_context
 _safe_color = editor_utils.safe_color
 _path_key = editor_utils.path_key
 _parse_ratio_value = editor_core.parse_ratio_value
+_is_ratio_free = editor_core.is_ratio_free
+_crop_box_has_effect = editor_core.crop_box_has_effect
+_crop_plan_from_override = editor_core._crop_plan_from_override
 _parse_bool_value = editor_core.parse_bool_value
 _parse_padding_value = editor_core.parse_padding_value
 _normalize_center_mode = editor_core.normalize_center_mode
@@ -59,6 +62,7 @@ _get_bird_detector_error_message = editor_core.get_bird_detector_error_message
 _CENTER_MODE_IMAGE = editor_core.CENTER_MODE_IMAGE
 _CENTER_MODE_FOCUS = editor_core.CENTER_MODE_FOCUS
 _CENTER_MODE_BIRD = editor_core.CENTER_MODE_BIRD
+_CENTER_MODE_CUSTOM = editor_core.CENTER_MODE_CUSTOM
 _DEFAULT_CROP_PADDING_PX = editor_core.DEFAULT_CROP_PADDING_PX
 _DEFAULT_TEMPLATE_CENTER_MODE = editor_template.DEFAULT_TEMPLATE_CENTER_MODE
 _DEFAULT_TEMPLATE_MAX_LONG_EDGE = editor_template.DEFAULT_TEMPLATE_MAX_LONG_EDGE
@@ -389,6 +393,8 @@ def _clone_render_settings(settings: dict[str, Any]) -> dict[str, Any]:
         max_long_edge = _DEFAULT_TEMPLATE_MAX_LONG_EDGE
     max_long_edge = max(0, max_long_edge)
 
+    custom_center_x = settings.get("custom_center_x")
+    custom_center_y = settings.get("custom_center_y")
     return {
         "template_name": template_name,
         "template_payload": _deep_copy_payload(template_payload),
@@ -406,6 +412,8 @@ def _clone_render_settings(settings: dict[str, Any]) -> dict[str, Any]:
             str(settings.get("crop_padding_fill") or "#FFFFFF"),
             "#FFFFFF",
         ),
+        "custom_center_x": float(custom_center_x) if custom_center_x is not None else None,
+        "custom_center_y": float(custom_center_y) if custom_center_y is not None else None,
     }
 
 
@@ -480,6 +488,7 @@ def _resolve_crop_anchor_and_keep_box(
     center_mode: str,
     bird_box_cache: dict[str, tuple[float, float, float, float] | None],
     bird_box_lock: threading.Lock | None = None,
+    custom_center: tuple[float, float] | None = None,
 ) -> tuple[tuple[float, float], tuple[float, float, float, float] | None]:
     focus_camera_type = _resolve_focus_camera_type_from_metadata(raw_metadata)
     focus_point = _get_focus_point_for_display(
@@ -489,6 +498,8 @@ def _resolve_crop_anchor_and_keep_box(
         camera_type=focus_camera_type,
     )
     mode = _normalize_center_mode(center_mode)
+    if mode == _CENTER_MODE_CUSTOM and custom_center is not None:
+        return (custom_center, None)
     bird_box: tuple[float, float, float, float] | None = None
     if mode in {_CENTER_MODE_BIRD, _CENTER_MODE_FOCUS}:
         bird_box = _resolve_bird_box_for_image(path, image, bird_box_cache, bird_box_lock)
@@ -584,8 +595,25 @@ def _compute_crop_plan_for_image(
     bird_box_lock: threading.Lock | None = None,
 ) -> tuple[tuple[float, float, float, float] | None, tuple[int, int, int, int]]:
     ratio = _parse_ratio_value(settings.get("ratio"))
-    if ratio is None:
+    crop_box_raw = settings.get("crop_box")
+    if crop_box_raw is not None and isinstance(crop_box_raw, (list, tuple)) and len(crop_box_raw) == 4:
+        try:
+            cb = (float(crop_box_raw[0]), float(crop_box_raw[1]), float(crop_box_raw[2]), float(crop_box_raw[3]))
+            if _crop_box_has_effect(cb):
+                return _crop_plan_from_override(image.width, image.height, cb)
+        except (TypeError, ValueError):
+            pass
+    if ratio is None or _is_ratio_free(ratio):
         return (None, (0, 0, 0, 0))
+
+    custom_center: tuple[float, float] | None = None
+    try:
+        cx = float(settings.get("custom_center_x")) if "custom_center_x" in settings else None
+        cy = float(settings.get("custom_center_y")) if "custom_center_y" in settings else None
+        if cx is not None and cy is not None:
+            custom_center = (cx, cy)
+    except Exception:
+        custom_center = None
 
     anchor, keep_box = _resolve_crop_anchor_and_keep_box(
         path=path,
@@ -594,6 +622,7 @@ def _compute_crop_plan_for_image(
         center_mode=str(settings.get("center_mode") or _CENTER_MODE_IMAGE),
         bird_box_cache=bird_box_cache,
         bird_box_lock=bird_box_lock,
+        custom_center=custom_center,
     )
     if keep_box is not None:
         crop_box, outer_pad = _compute_auto_bird_crop_plan(
