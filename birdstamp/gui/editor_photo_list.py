@@ -28,7 +28,10 @@ PHOTO_COL_CAPTURE_TIME = 2
 PHOTO_COL_TITLE = 3
 PHOTO_COL_RATIO = 4
 PHOTO_COL_RATING = 5
-PHOTO_COL_ROW = 6
+PHOTO_COL_SHUTTER = 6
+PHOTO_COL_ISO = 7
+PHOTO_COL_APERTURE = 8
+PHOTO_COL_ROW = 9
 
 # Custom item data roles (for path, sequence, sort key)
 _UserRole = int(Qt.ItemDataRole.UserRole)
@@ -156,9 +159,9 @@ class PhotoListWidget(FileListPanel):
         # 隐藏 FileListPanel 扩展 UI（仍保留底层树控件）。
         self._hide_non_tree_ui()
 
-        # 主编辑器沿用通用文件列表的编号列，并收敛为 7 列（含隐藏 ROW 数据列）。
-        self._tree_widget.setColumnCount(7)
-        self._tree_widget.setHeaderLabels(["#", "文件名", "拍摄时间", "鸟名", "裁切比例", "标星", ""])
+        # 主编辑器沿用通用文件列表的编号列，并扩展出快门 / ISO / 光圈列。
+        self._tree_widget.setColumnCount(10)
+        self._tree_widget.setHeaderLabels(["#", "文件名", "拍摄时间", "鸟名", "裁切比例", "标星", "快门", "ISO", "光圈", ""])
         self._tree_widget.setAcceptDrops(True)
         self._tree_widget.setDragDropMode(QAbstractItemView.DragDropMode.DropOnly)
 
@@ -167,11 +170,14 @@ class PhotoListWidget(FileListPanel):
         header.setSectionsClickable(True)
         header.setSortIndicatorShown(True)
         header.setSectionResizeMode(PHOTO_COL_SEQ, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(PHOTO_COL_NAME, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(PHOTO_COL_CAPTURE_TIME, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(PHOTO_COL_TITLE, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(PHOTO_COL_RATIO, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(PHOTO_COL_RATING, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(PHOTO_COL_NAME, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(PHOTO_COL_CAPTURE_TIME, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(PHOTO_COL_TITLE, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(PHOTO_COL_RATIO, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(PHOTO_COL_RATING, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(PHOTO_COL_SHUTTER, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(PHOTO_COL_ISO, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(PHOTO_COL_APERTURE, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(PHOTO_COL_ROW, QHeaderView.ResizeMode.Fixed)
         header.resizeSection(PHOTO_COL_SEQ, 44)
         header.resizeSection(PHOTO_COL_NAME, 260)
@@ -179,6 +185,9 @@ class PhotoListWidget(FileListPanel):
         header.resizeSection(PHOTO_COL_TITLE, 160)
         header.resizeSection(PHOTO_COL_RATIO, 96)
         header.resizeSection(PHOTO_COL_RATING, 88)
+        header.resizeSection(PHOTO_COL_SHUTTER, 84)
+        header.resizeSection(PHOTO_COL_ISO, 72)
+        header.resizeSection(PHOTO_COL_APERTURE, 72)
         header.resizeSection(PHOTO_COL_ROW, 0)  # ROW 数据列隐藏
 
         # 兼容旧控件的默认行为

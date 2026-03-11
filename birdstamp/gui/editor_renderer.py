@@ -48,6 +48,7 @@ _render_template_overlay_in_crop_region = editor_template.render_template_overla
 _DEFAULT_TEMPLATE_CENTER_MODE       = editor_template.DEFAULT_TEMPLATE_CENTER_MODE
 _DEFAULT_TEMPLATE_MAX_LONG_EDGE     = editor_template.DEFAULT_TEMPLATE_MAX_LONG_EDGE
 _DEFAULT_CROP_PADDING_PX            = editor_core.DEFAULT_CROP_PADDING_PX
+_CENTER_MODE_CUSTOM                 = editor_core.CENTER_MODE_CUSTOM
 RATIO_FREE                          = editor_options.RATIO_FREE
 OUTPUT_FORMAT_OPTIONS               = editor_options.OUTPUT_FORMAT_OPTIONS
 
@@ -55,24 +56,36 @@ OUTPUT_FORMAT_OPTIONS               = editor_options.OUTPUT_FORMAT_OPTIONS
 class _BirdStampRendererMixin:
     """Mixin: preview-cache, render-settings, image processing pipeline, render_preview."""
 
-    @staticmethod
-    def _padding_widget_value(widget: Any) -> int:
-        """兼容 QSpinBox / 可编辑 QComboBox 读取边界填充值。"""
-        if widget is None:
-            return _DEFAULT_CROP_PADDING_PX
-        value_attr = getattr(widget, "value", None)
-        if callable(value_attr):
+    def _crop_padding_state_for_render(self) -> dict[str, Any]:
+        getter = getattr(self, "_get_crop_padding_state", None)
+        if callable(getter):
             try:
-                return int(value_attr())
+                state = getter()
             except Exception:
-                pass
-        current_text_attr = getattr(widget, "currentText", None)
-        if callable(current_text_attr):
-            return _parse_padding_value(current_text_attr(), _DEFAULT_CROP_PADDING_PX)
-        text_attr = getattr(widget, "text", None)
-        if callable(text_attr):
-            return _parse_padding_value(text_attr(), _DEFAULT_CROP_PADDING_PX)
-        return _DEFAULT_CROP_PADDING_PX
+                state = {}
+        else:
+            state = {}
+        if not isinstance(state, dict):
+            state = {}
+        return {
+            "top": _parse_padding_value(state.get("top", _DEFAULT_CROP_PADDING_PX), _DEFAULT_CROP_PADDING_PX),
+            "bottom": _parse_padding_value(state.get("bottom", _DEFAULT_CROP_PADDING_PX), _DEFAULT_CROP_PADDING_PX),
+            "left": _parse_padding_value(state.get("left", _DEFAULT_CROP_PADDING_PX), _DEFAULT_CROP_PADDING_PX),
+            "right": _parse_padding_value(state.get("right", _DEFAULT_CROP_PADDING_PX), _DEFAULT_CROP_PADDING_PX),
+            "fill": _safe_color(str(state.get("fill", "#FFFFFF")), "#FFFFFF"),
+        }
+
+    def _apply_crop_padding_state_from_settings(self, settings: dict[str, Any]) -> None:
+        setter = getattr(self, "_set_crop_padding_state", None)
+        if not callable(setter):
+            return
+        setter(
+            top=_parse_padding_value(settings.get("crop_padding_top", _DEFAULT_CROP_PADDING_PX), _DEFAULT_CROP_PADDING_PX),
+            bottom=_parse_padding_value(settings.get("crop_padding_bottom", _DEFAULT_CROP_PADDING_PX), _DEFAULT_CROP_PADDING_PX),
+            left=_parse_padding_value(settings.get("crop_padding_left", _DEFAULT_CROP_PADDING_PX), _DEFAULT_CROP_PADDING_PX),
+            right=_parse_padding_value(settings.get("crop_padding_right", _DEFAULT_CROP_PADDING_PX), _DEFAULT_CROP_PADDING_PX),
+            fill=_safe_color(str(settings.get("crop_padding_fill", "#FFFFFF")), "#FFFFFF"),
+        )
 
     def _build_preview_overlay_options(self) -> EditorPreviewOverlayOptions:
         """Build editor preview overlay options from the current toolbar UI state."""
@@ -122,13 +135,11 @@ class _BirdStampRendererMixin:
         draw_overlay = f"{self.draw_banner_check.isChecked()}|{self.draw_text_check.isChecked()}|{self.draw_focus_check.isChecked()}"
         r = self._selected_ratio()
         cm = self._selected_center_mode()
-        pt = self._padding_widget_value(self.crop_padding_top)
-        pb = self._padding_widget_value(self.crop_padding_bottom)
-        pl = self._padding_widget_value(self.crop_padding_left)
-        pr = self._padding_widget_value(self.crop_padding_right)
-        fill = getattr(self, "crop_padding_fill_combo", None)
-        fill_val = fill.currentData() if fill is not None and fill.currentData() else "#FFFFFF"
-        return f"{base}|{template_name}|{draw_overlay}|{r}|{cm}|{pt}_{pb}_{pl}_{pr}|{fill_val}"
+        padding = self._crop_padding_state_for_render()
+        return (
+            f"{base}|{template_name}|{draw_overlay}|{r}|{cm}|"
+            f"{padding['top']}_{padding['bottom']}_{padding['left']}_{padding['right']}|{padding['fill']}"
+        )
 
     def _preview_render_settings(self, settings: dict[str, Any]) -> dict[str, Any]:
         """预览固定按原图尺寸渲染，避免 Banner 在预览阶段被二次缩放。"""
@@ -335,6 +346,7 @@ class _BirdStampRendererMixin:
         template_payload = _normalize_template_payload(self.current_template_payload, fallback_name=template_name)
         center_mode = self._selected_center_mode()
         custom_center = getattr(self, "_custom_center", None)
+        padding = self._crop_padding_state_for_render()
         return {
             "template_name": template_name,
             "template_payload": _deep_copy_payload(template_payload),
@@ -344,14 +356,11 @@ class _BirdStampRendererMixin:
             "ratio": self._selected_ratio(),
             "center_mode": center_mode,
             "max_long_edge": self._selected_max_long_edge(),
-            "crop_padding_top": self._padding_widget_value(self.crop_padding_top),
-            "crop_padding_bottom": self._padding_widget_value(self.crop_padding_bottom),
-            "crop_padding_left": self._padding_widget_value(self.crop_padding_left),
-            "crop_padding_right": self._padding_widget_value(self.crop_padding_right),
-            "crop_padding_fill": _safe_color(
-                str(self.crop_padding_fill_combo.currentData() or "#FFFFFF"),
-                "#FFFFFF",
-            ),
+            "crop_padding_top": padding["top"],
+            "crop_padding_bottom": padding["bottom"],
+            "crop_padding_left": padding["left"],
+            "crop_padding_right": padding["right"],
+            "crop_padding_fill": padding["fill"],
             "crop_box": getattr(self, "_crop_box_override", None),
             "custom_center_x": float(custom_center[0]) if center_mode == _CENTER_MODE_CUSTOM and custom_center else None,
             "custom_center_y": float(custom_center[1]) if center_mode == _CENTER_MODE_CUSTOM and custom_center else None,
@@ -531,14 +540,7 @@ class _BirdStampRendererMixin:
             max_edge_idx = self._ensure_max_edge_option(int(normalized["max_long_edge"]))
             if max_edge_idx >= 0:
                 self.max_edge_combo.setCurrentIndex(max_edge_idx)
-
-            self._crop_padding_widget.set_values(
-                top=_parse_padding_value(normalized.get("crop_padding_top", _DEFAULT_CROP_PADDING_PX), _DEFAULT_CROP_PADDING_PX),
-                bottom=_parse_padding_value(normalized.get("crop_padding_bottom", _DEFAULT_CROP_PADDING_PX), _DEFAULT_CROP_PADDING_PX),
-                left=_parse_padding_value(normalized.get("crop_padding_left", _DEFAULT_CROP_PADDING_PX), _DEFAULT_CROP_PADDING_PX),
-                right=_parse_padding_value(normalized.get("crop_padding_right", _DEFAULT_CROP_PADDING_PX), _DEFAULT_CROP_PADDING_PX),
-                fill=_safe_color(str(normalized.get("crop_padding_fill", "#FFFFFF")), "#FFFFFF"),
-            )
+            self._apply_crop_padding_state_from_settings(normalized)
         finally:
             for w in reversed(widgets_to_block):
                 w.blockSignals(False)

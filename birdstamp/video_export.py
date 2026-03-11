@@ -12,6 +12,7 @@ import math
 import threading
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
 
@@ -33,8 +34,8 @@ _PLATFORM_TOOL_SUBDIR = {
     "win32": "windows",
 }
 _BIRD_DETECT_WARNING_EMITTED = False
-_MAX_AUTO_VIDEO_RENDER_WORKERS = 6
-_VIDEO_RENDER_CACHE_VERSION = 1
+_VIDEO_RENDER_CACHE_VERSION = 2
+_VIDEO_RENDER_CACHE_ROOT_NAME = "birdstamp_video_cache"
 
 _build_metadata_context = editor_utils.build_metadata_context
 _safe_color = editor_utils.safe_color
@@ -354,6 +355,7 @@ def _json_dumps_stable(value: Any) -> str:
 
 
 def _render_cache_key(jobs: list[VideoFrameJob], options: VideoExportOptions) -> str:
+    """仅包含影响帧图像内容的参数，编码/FPS 变化不会切换缓存。"""
     validated = validate_video_export_options(options)
     payload = {
         "version": _VIDEO_RENDER_CACHE_VERSION,
@@ -373,8 +375,10 @@ def _render_cache_key(jobs: list[VideoFrameJob], options: VideoExportOptions) ->
     return hashlib.sha1(_json_dumps_stable(payload).encode("utf-8")).hexdigest()
 
 
-def _sanitize_video_work_name(text: str) -> str:
+def _sanitize_video_work_name(text: str, *, max_length: int = 64) -> str:
     sanitized = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in str(text or "").strip())
+    if len(sanitized) > max_length:
+        sanitized = sanitized[:max_length].rstrip("_-")
     return sanitized or "video"
 
 
@@ -395,6 +399,22 @@ def _clone_render_settings(settings: dict[str, Any]) -> dict[str, Any]:
 
     custom_center_x = settings.get("custom_center_x")
     custom_center_y = settings.get("custom_center_y")
+    crop_box: list[float] | None = None
+    crop_box_raw = settings.get("crop_box")
+    if isinstance(crop_box_raw, (list, tuple)) and len(crop_box_raw) == 4:
+        try:
+            normalized_crop_box = _normalize_unit_box(
+                (
+                    float(crop_box_raw[0]),
+                    float(crop_box_raw[1]),
+                    float(crop_box_raw[2]),
+                    float(crop_box_raw[3]),
+                )
+            )
+            if _crop_box_has_effect(normalized_crop_box):
+                crop_box = [float(value) for value in normalized_crop_box]
+        except Exception:
+            crop_box = None
     return {
         "template_name": template_name,
         "template_payload": _deep_copy_payload(template_payload),
@@ -412,6 +432,7 @@ def _clone_render_settings(settings: dict[str, Any]) -> dict[str, Any]:
             str(settings.get("crop_padding_fill") or "#FFFFFF"),
             "#FFFFFF",
         ),
+        "crop_box": crop_box,
         "custom_center_x": float(custom_center_x) if custom_center_x is not None else None,
         "custom_center_y": float(custom_center_y) if custom_center_y is not None else None,
     }
@@ -791,6 +812,57 @@ def _ffmpeg_fps_text(fps: float) -> str:
     return text or "25"
 
 
+def _recommended_auto_render_workers(
+    *,
+    physical_cpu_count: int | None,
+    logical_cpu_count: int | None,
+) -> int:
+    """自动渲染线程数。
+
+    优先按物理核心估算为 `核心数 * 2 - 4`，给系统/前台交互预留余量；
+    如果拿不到物理核心数，则退回到逻辑核心数减 4。
+    """
+    if physical_cpu_count is not None:
+        try:
+            physical = max(1, int(physical_cpu_count))
+        except Exception:
+            physical = 1
+        return max(1, physical * 2 - 4)
+
+    try:
+        logical = max(1, int(logical_cpu_count or 1))
+    except Exception:
+        logical = 1
+    return max(1, logical - 4)
+
+
+@lru_cache(maxsize=1)
+def _detect_physical_cpu_count() -> int | None:
+    try:
+        import psutil  # optional dependency
+
+        detected = psutil.cpu_count(logical=False)
+        if detected is not None and int(detected) > 0:
+            return int(detected)
+    except Exception:
+        pass
+
+    if sys.platform == "darwin":
+        try:
+            output = subprocess.check_output(
+                ["sysctl", "-n", "hw.physicalcpu"],
+                stderr=subprocess.DEVNULL,
+                text=True,
+            ).strip()
+            detected = int(output)
+            if detected > 0:
+                return detected
+        except Exception:
+            return None
+
+    return None
+
+
 def resolve_video_render_workers(render_workers: int, pending_jobs: int) -> int:
     if pending_jobs <= 0:
         return 1
@@ -798,9 +870,10 @@ def resolve_video_render_workers(render_workers: int, pending_jobs: int) -> int:
     if requested > 0:
         return max(1, min(requested, pending_jobs))
 
-    cpu_count = max(1, int(os.cpu_count() or 1))
-    auto_workers = cpu_count if cpu_count <= 2 else cpu_count - 1
-    auto_workers = max(1, min(auto_workers, _MAX_AUTO_VIDEO_RENDER_WORKERS))
+    auto_workers = _recommended_auto_render_workers(
+        physical_cpu_count=_detect_physical_cpu_count(),
+        logical_cpu_count=os.cpu_count(),
+    )
     return max(1, min(auto_workers, pending_jobs))
 
 
@@ -932,19 +1005,24 @@ def _subprocess_popen_kwargs() -> dict[str, Any]:
     return kwargs
 
 
-def _persistent_video_work_dir(output_path: Path) -> Path:
+def _persistent_video_cache_root(output_path: Path) -> Path:
     parent_dir = output_path.parent
     parent_dir.mkdir(parents=True, exist_ok=True)
-    suffix_tag = output_path.suffix.lower().lstrip(".") or "video"
-    safe_name = _sanitize_video_work_name(f"{output_path.stem}__{suffix_tag}")
-    return parent_dir / f"{safe_name}__birdstamp_video_work"
+    safe_name = _sanitize_video_work_name(output_path.stem.strip() or "video", max_length=48)
+    return parent_dir / _VIDEO_RENDER_CACHE_ROOT_NAME / safe_name
 
 
-def _create_video_work_dir(output_path: Path, *, preserve_temp_files: bool) -> Path:
+def _persistent_video_work_dir(output_path: Path, *, cache_key: str) -> Path:
+    cache_root = _persistent_video_cache_root(output_path)
+    cache_tag = str(cache_key or "").strip().lower() or "default"
+    return cache_root / f"render_{cache_tag}"
+
+
+def _create_video_work_dir(output_path: Path, *, preserve_temp_files: bool, cache_key: str = "") -> Path:
     parent_dir = output_path.parent
     parent_dir.mkdir(parents=True, exist_ok=True)
     if preserve_temp_files:
-        return _persistent_video_work_dir(output_path)
+        return _persistent_video_work_dir(output_path, cache_key=cache_key)
     stem = output_path.stem.strip() or "video"
     safe_stem = _sanitize_video_work_name(stem)
     work_dir_text = tempfile.mkdtemp(prefix=f"{safe_stem}__birdstamp_video_work_", dir=str(parent_dir))
@@ -1180,7 +1258,11 @@ def export_video(
     bird_box_lock = threading.Lock()
     total = len(jobs)
     cache_key = _render_cache_key(jobs, validated)
-    work_dir = _create_video_work_dir(output_path, preserve_temp_files=validated.preserve_temp_files)
+    work_dir = _create_video_work_dir(
+        output_path,
+        preserve_temp_files=validated.preserve_temp_files,
+        cache_key=cache_key,
+    )
     reusable_manifest: dict[str, Any] | None = None
     if validated.preserve_temp_files and work_dir.exists():
         reusable_manifest = _load_render_manifest(work_dir)

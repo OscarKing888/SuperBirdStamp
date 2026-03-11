@@ -6,11 +6,44 @@ from typing import Any
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from app_common.exif_io import read_batch_metadata
+from app_common.exif_io import DEFAULT_METADATA_TAGS, read_batch_metadata
 from app_common.log import get_logger
 
 _log = get_logger("editor.photo_metadata_loader")
 _PHOTO_LIST_METADATA_CHUNK_SIZE = 48
+_PHOTO_LIST_CAMERA_METADATA_TAGS = [
+    "-ExifIFD:ExposureTime",
+    "-EXIF:ExposureTime",
+    "-XMP-exif:ExposureTime",
+    "-Composite:ShutterSpeed",
+    "-ExifIFD:ISO",
+    "-EXIF:ISO",
+    "-XMP-exif:PhotographicSensitivity",
+    "-XMP-exif:ISOSpeedRatings",
+    "-ExifIFD:FNumber",
+    "-EXIF:FNumber",
+    "-XMP-exif:FNumber",
+    "-Composite:Aperture",
+]
+
+
+def _merge_metadata_tags(*groups: list[str]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for tag in group or []:
+            text = str(tag or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            merged.append(text)
+    return merged
+
+
+_PHOTO_LIST_METADATA_TAGS = _merge_metadata_tags(
+    DEFAULT_METADATA_TAGS,
+    _PHOTO_LIST_CAMERA_METADATA_TAGS,
+)
 
 
 class EditorPhotoListMetadataLoader(QThread):
@@ -57,7 +90,7 @@ class EditorPhotoListMetadataLoader(QThread):
         if not chunk:
             return {}
         try:
-            raw_batch = read_batch_metadata(chunk)
+            raw_batch = read_batch_metadata(chunk, tags=_PHOTO_LIST_METADATA_TAGS, use_cache=False)
         except Exception as exc:
             _log.warning("[EditorPhotoListMetadataLoader._read_chunk] batch read failed: %s", exc)
             raw_batch = {}

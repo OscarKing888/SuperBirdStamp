@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -163,15 +164,10 @@ class VideoExportPanel(QGroupBox):
 
         self.preserve_temp_files_check = QCheckBox("保留临时文件")
         self.preserve_temp_files_check.setChecked(True)
-        self.preserve_temp_files_check.setToolTip("保留并复用已渲染的视频帧；当图像导出选项未变化时，下次可直接复用。")
+        self.preserve_temp_files_check.setToolTip(
+            "保留并复用已渲染的视频帧；只有影响帧图像内容的参数变化时才会切换到新的缓存目录。"
+        )
         form.addRow("帧缓存", self.preserve_temp_files_check)
-
-        root.addLayout(form)
-
-        self.hint_label = QLabel("按当前文件列表顺序生成视频，需要 ffmpeg；勾选“保留临时文件”后，同一输出任务在图像选项不变时可复用已渲染帧。")
-        self.hint_label.setStyleSheet("color: #7A7A7A; font-size: 11px;")
-        self.hint_label.setWordWrap(True)
-        root.addWidget(self.hint_label)
 
         button_row = QHBoxLayout()
         button_row.setContentsMargins(0, 0, 0, 0)
@@ -179,15 +175,30 @@ class VideoExportPanel(QGroupBox):
 
         self.export_button = QPushButton("生成视频")
         self.export_button.clicked.connect(self._emit_export_request)
-        button_row.addWidget(self.export_button)
 
         self.cancel_button = QPushButton("中断导出")
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(self._emit_cancel_request)
-        button_row.addWidget(self.cancel_button)
 
-        button_row.addStretch(1)
-        root.addLayout(button_row)
+        button_min_width = max(
+            self.export_button.sizeHint().width(),
+            self.cancel_button.sizeHint().width(),
+            112,
+        )
+        for button in (self.export_button, self.cancel_button):
+            button.setMinimumWidth(button_min_width)
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            button_row.addWidget(button, stretch=1)
+
+        form.addRow("", button_row)
+        root.addLayout(form)
+
+        self.hint_label = QLabel(
+            "按当前文件列表顺序生成视频，需要 ffmpeg；勾选“保留临时文件”后，FPS/编码参数会复用已有帧，影响图像内容的参数变化则会切换到新的缓存目录。"
+        )
+        self.hint_label.setStyleSheet("color: #7A7A7A; font-size: 11px;")
+        self.hint_label.setWordWrap(True)
+        root.addWidget(self.hint_label)
 
         self.status_label = QLabel("")
         self.status_label.setStyleSheet("color: #7A7A7A; font-size: 11px;")

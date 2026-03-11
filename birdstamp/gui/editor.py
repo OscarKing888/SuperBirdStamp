@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 import math
+import os
 import re
 import sys
 import threading
@@ -56,14 +57,13 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QHeaderView,
     QScrollArea,
+    QSizePolicy,
     QSlider,
     QSplitter,
-    QSpinBox,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
-    QColorDialog,
 )
 
 from app_common.about_dialog import load_about_info, load_about_images, show_about_dialog
@@ -83,6 +83,7 @@ from birdstamp.decoders.image_decoder import decode_image
 from birdstamp.discover import discover_inputs
 from app_common.exif_io import (
     extract_many,
+    extract_many_with_xmp_priority,
     extract_pillow_metadata,
     extract_metadata_with_xmp_priority,
     read_batch_metadata,
@@ -96,7 +97,6 @@ from birdstamp.gui import editor_template
 from birdstamp.gui import editor_utils
 from birdstamp.gui import template_context as _template_context
 from birdstamp.gui.editor_template_dialog import (
-    _CropPaddingEditorWidget,
     _GradientBarWidget,  # noqa: F401  (re-exported for compat)
     _GradientEditorWidget,  # noqa: F401
     TemplateManagerDialog,
@@ -105,12 +105,15 @@ from app_common.preview_canvas import PreviewWithStatusBar
 from birdstamp.gui.editor_preview_canvas import EditorPreviewCanvas, EditorPreviewOverlayState
 from birdstamp.gui.editor_photo_metadata_loader import EditorPhotoListMetadataLoader
 from birdstamp.gui.editor_photo_list import (
+    PHOTO_COL_APERTURE,
     PHOTO_COL_CAPTURE_TIME,
+    PHOTO_COL_ISO,
     PHOTO_COL_NAME,
     PHOTO_COL_RATING,
     PHOTO_COL_RATIO,
     PHOTO_COL_ROW,
     PHOTO_COL_SEQ,
+    PHOTO_COL_SHUTTER,
     PHOTO_COL_TITLE,
     PHOTO_LIST_PHOTO_INFO_ROLE,
     PHOTO_LIST_PATH_ROLE,
@@ -326,6 +329,13 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         self._original_mode_signature: str | None = None
         self._bird_box_cache: dict[str, tuple[float, float, float, float] | None] = {}
         self.photo_render_overrides: dict[str, dict[str, Any]] = {}
+        self._crop_padding_state: dict[str, Any] = {
+            "top": _DEFAULT_CROP_PADDING_PX,
+            "bottom": _DEFAULT_CROP_PADDING_PX,
+            "left": _DEFAULT_CROP_PADDING_PX,
+            "right": _DEFAULT_CROP_PADDING_PX,
+            "fill": "#FFFFFF",
+        }
         self._bird_detect_error_reported = False
         self._bird_detector_preload_started = False
         self._bird_detector_preload_thread: threading.Thread | None = None
@@ -345,6 +355,8 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         self._photo_list_header_fast_mode = False
         self._pending_preview_fit_reset: bool = False
         self._video_export_worker: VideoExportWorker | None = None
+        self._image_export_progress_token: int = 0
+        self._image_export_active_worker_count: int = 0
         self._image_export_last_output_dir: Path | None = self._load_image_export_last_output_dir()
         self._batch_export_last_output_dir: Path | None = self._load_batch_export_last_output_dir()
         self._video_export_last_output_dir: Path | None = self._load_video_export_last_output_dir()
@@ -577,7 +589,6 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
 
         self._setup_ui_photos_list(left_layout)
         self._setup_ui_template_output_actions(left_layout)
-        left_layout.addStretch(1)
         left_scroll.setWidget(left_panel)
 
         right_panel = self._setup_ui_preview_panel()
@@ -663,6 +674,7 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         self.photo_list.pathsDropped.connect(self._add_photo_paths)
         self.photo_list.currentItemChanged.connect(self._on_photo_selected)
         self.photo_list.setMinimumHeight(240)
+        self.photo_list.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         photos_layout.addWidget(self.photo_list, stretch=1)
 
         hint = QLabel("支持拖入单张照片或整个目录")
@@ -670,8 +682,9 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         photos_layout.addWidget(hint)
 
         photos_section = CollapsibleSection("照片列表", expanded=True)
+        photos_section.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         photos_section.set_content_widget(photos_content)
-        left_layout.addWidget(photos_section)
+        left_layout.addWidget(photos_section, stretch=1)
 
     # ------------------------------------------------------------------
     # ReportDB 列表与缓存
@@ -735,27 +748,12 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         self.center_mode_combo.currentIndexChanged.connect(self._on_crop_settings_changed)
         override_form.addRow("裁切中心", self.center_mode_combo)
 
-        self._crop_padding_widget = _CropPaddingEditorWidget()
-        self._crop_padding_widget.changed.connect(self._on_crop_settings_changed)
-        # Backward-compat aliases used throughout the rest of the file
-        self.crop_padding_top = self._crop_padding_widget.top_spin
-        self.crop_padding_bottom = self._crop_padding_widget.bottom_spin
-        self.crop_padding_left = self._crop_padding_widget.left_spin
-        self.crop_padding_right = self._crop_padding_widget.right_spin
-        self.crop_padding_top_slider = self._crop_padding_widget.top_slider
-        self.crop_padding_bottom_slider = self._crop_padding_widget.bottom_slider
-        self.crop_padding_left_slider = self._crop_padding_widget.left_slider
-        self.crop_padding_right_slider = self._crop_padding_widget.right_slider
-        self.crop_padding_fill_combo = self._crop_padding_widget.fill_combo
-        self.crop_padding_fill_swatch = self._crop_padding_widget.fill_swatch
-        override_form.addRow("边界填充 / 外圈颜色", self._crop_padding_widget)
-
         override_btn_row = QHBoxLayout()
         reset_override_btn = QPushButton("重置为模板值")
         reset_override_btn.setToolTip(
             "<b>重置为模板值</b><br>"
-            "将「裁切比例」「裁切中心」「裁切策略」<br>"
-            "「边界填充」「外圈颜色」等选项恢复为<br>"
+            "将「裁切比例」「裁切中心」以及当前模板<br>"
+            "记录的裁剪框默认值恢复为<br>"
             "当前所选模板中存储的默认值。<br>"
             "<i>适合撤销手动调整、快速回到模板初始状态。</i>"
         )
@@ -766,8 +764,8 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
             "<b>全部应用</b><br>"
             "将当前「模板选项重载」中的所有设置<br>"
             "批量覆盖到已加载的每张照片，<br>"
-            "包括裁切比例、中心模式、策略、<br>"
-            "边界填充及外圈颜色。<br>"
+            "包括裁切比例、中心模式以及<br>"
+            "当前照片上调整过的裁剪框。<br>"
             "<i>仅影响本次会话的照片列表，不修改模板文件。</i>"
         )
         self.apply_all_btn.clicked.connect(self._apply_current_settings_to_all_photos)
@@ -843,17 +841,28 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         self.max_edge_combo.setCurrentIndex(0)
         self.max_edge_combo.currentIndexChanged.connect(self._on_output_settings_changed)
         image_export_form.addRow("最大长边", self.max_edge_combo)
-        image_export_layout.addLayout(image_export_form)
 
         export_btn_row = QHBoxLayout()
+        export_btn_row.setContentsMargins(0, 0, 0, 0)
         export_btn_row.setSpacing(6)
-        export_current_btn = QPushButton("导出当前")
-        export_current_btn.clicked.connect(self.export_current)
-        export_btn_row.addWidget(export_current_btn)
-        export_batch_btn = QPushButton("批量导出")
-        export_batch_btn.clicked.connect(self.export_all)
-        export_btn_row.addWidget(export_batch_btn)
-        image_export_layout.addLayout(export_btn_row)
+        self.export_current_btn = QPushButton("导出当前")
+        self.export_current_btn.clicked.connect(self.export_current)
+        export_btn_row.addWidget(self.export_current_btn)
+        self.export_batch_btn = QPushButton("批量导出")
+        self.export_batch_btn.clicked.connect(self.export_all)
+        export_btn_row.addWidget(self.export_batch_btn)
+        image_export_form.addRow("", export_btn_row)
+        image_export_layout.addLayout(image_export_form)
+
+        self.image_export_progress = QProgressBar()
+        self.image_export_progress.setMinimum(0)
+        self.image_export_progress.setMaximum(1)
+        self.image_export_progress.setValue(0)
+        self.image_export_progress.setFixedHeight(18)
+        self.image_export_progress.setTextVisible(True)
+        self.image_export_progress.setFormat("图片导出 0/0")
+        self.image_export_progress.hide()
+        image_export_layout.addWidget(self.image_export_progress)
         export_root.addWidget(image_export_group)
 
         self.video_export_panel = VideoExportPanel()
@@ -1223,6 +1232,38 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         self._crop_box_override = box
         self._on_crop_settings_changed()
 
+    def _get_crop_padding_state(self) -> dict[str, Any]:
+        state = self._crop_padding_state if isinstance(self._crop_padding_state, dict) else {}
+        return {
+            "top": _parse_padding_value(state.get("top", _DEFAULT_CROP_PADDING_PX), _DEFAULT_CROP_PADDING_PX),
+            "bottom": _parse_padding_value(state.get("bottom", _DEFAULT_CROP_PADDING_PX), _DEFAULT_CROP_PADDING_PX),
+            "left": _parse_padding_value(state.get("left", _DEFAULT_CROP_PADDING_PX), _DEFAULT_CROP_PADDING_PX),
+            "right": _parse_padding_value(state.get("right", _DEFAULT_CROP_PADDING_PX), _DEFAULT_CROP_PADDING_PX),
+            "fill": _safe_color(str(state.get("fill", "#FFFFFF")), "#FFFFFF"),
+        }
+
+    def _set_crop_padding_state(
+        self,
+        *,
+        top: Any | None = None,
+        bottom: Any | None = None,
+        left: Any | None = None,
+        right: Any | None = None,
+        fill: Any | None = None,
+    ) -> None:
+        state = self._get_crop_padding_state()
+        if top is not None:
+            state["top"] = _parse_padding_value(top, _DEFAULT_CROP_PADDING_PX)
+        if bottom is not None:
+            state["bottom"] = _parse_padding_value(bottom, _DEFAULT_CROP_PADDING_PX)
+        if left is not None:
+            state["left"] = _parse_padding_value(left, _DEFAULT_CROP_PADDING_PX)
+        if right is not None:
+            state["right"] = _parse_padding_value(right, _DEFAULT_CROP_PADDING_PX)
+        if fill is not None:
+            state["fill"] = _safe_color(str(fill), "#FFFFFF")
+        self._crop_padding_state = state
+
     def _update_crop_padding_from_box(
         self,
         box: tuple[float, float, float, float],
@@ -1240,16 +1281,13 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         bottom_px = int(round((1.0 - b) * height))
         left_px = int(round(l * width))
         right_px = int(round((1.0 - r) * width))
-        # 同步到 UI widget（不走 changed 信号，避免递归）
-        self._crop_padding_widget.set_values(
+        fill_color = self._get_crop_padding_state()["fill"]
+        self._set_crop_padding_state(
             top=top_px,
             bottom=bottom_px,
             left=left_px,
             right=right_px,
-            fill=_safe_color(
-                str(self.crop_padding_fill_combo.currentData() or "#FFFFFF"),
-                "#FFFFFF",
-            ),
+            fill=fill_color,
         )
 
     def _set_custom_center_from_box(self, box: tuple[float, float, float, float]) -> None:
@@ -1274,12 +1312,6 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         alpha = max(0, min(255, int(value)))
         self.crop_effect_alpha_value_label.setText(str(alpha))
         self._apply_preview_overlay_options_from_ui()
-
-    def _sync_crop_padding_slider_from_spin(self, slider: QSlider, value: int) -> None:
-        self._crop_padding_widget._sync_slider(slider, value)
-
-    def _sync_crop_padding_spin_from_slider(self, spin: QSpinBox, value: int) -> None:
-        self._crop_padding_widget._sync_spin(spin, value)
 
     def _on_ratio_changed(self, *_args: Any) -> None:
         """裁切比例变更：使当前裁切框与新区比例一致（按中心约束），再走 settings 流程。"""
@@ -1316,21 +1348,6 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
             self._update_photo_list_item_display(self.current_path, settings=snapshot)
             self._invalidate_original_mode_cache()
         self._preview_debounce_timer.start()
-
-    def _refresh_crop_padding_fill_swatch(self, *_args: Any) -> None:
-        self._crop_padding_widget._refresh_fill_swatch()
-
-    def _set_crop_padding_fill_color(self, color_text: str) -> None:
-        self._crop_padding_widget._set_fill_value(color_text)
-
-    def _pick_crop_padding_fill_color(self) -> None:
-        self._crop_padding_widget._pick_fill_color()
-
-    def _pick_crop_padding_fill_color_from_screen(self) -> None:
-        def _apply(color_hex: str) -> None:
-            self._crop_padding_widget._set_fill_value(color_hex)
-
-        _start_screen_color_picker(parent=self, on_picked=_apply)
 
     def _start_bird_detector_preload(self) -> None:
         if self._bird_detector_preload_started:
@@ -1414,7 +1431,7 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
 
     def _apply_template_crop_padding_to_main_output(self) -> None:
         p = self.current_template_payload
-        self._crop_padding_widget.set_values(
+        self._set_crop_padding_state(
             top=_parse_padding_value(p.get("crop_padding_top", _DEFAULT_CROP_PADDING_PX), _DEFAULT_CROP_PADDING_PX),
             bottom=_parse_padding_value(p.get("crop_padding_bottom", _DEFAULT_CROP_PADDING_PX), _DEFAULT_CROP_PADDING_PX),
             left=_parse_padding_value(p.get("crop_padding_left", _DEFAULT_CROP_PADDING_PX), _DEFAULT_CROP_PADDING_PX),
@@ -1431,7 +1448,7 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
             self._crop_box_override = None
 
     def _apply_template_output_settings_to_main_output(self) -> None:
-        """将模板中的裁切策略 / 裁切中心 / 最大长边应用到主界面控件。"""
+        """将模板中的裁切中心 / 最大长边应用到主界面控件。"""
         p = self.current_template_payload
 
         center = _normalize_center_mode(p.get("center_mode", _DEFAULT_TEMPLATE_CENTER_MODE))
@@ -1724,6 +1741,114 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
             return "-"
         return "★" * stars
 
+    def _extract_display_camera_settings_from_metadata(
+        self,
+        photo_info: _template_context.PhotoInfo,
+    ) -> tuple[str, tuple[int, float], str, tuple[int, int], str, tuple[int, float]]:
+        raw_metadata = _template_context.ensure_photo_info(photo_info).raw_metadata or {}
+        lookup = _normalize_lookup(raw_metadata) if isinstance(raw_metadata, dict) else {}
+
+        def _first_value(*keys: str) -> Any:
+            for key in keys:
+                value = lookup.get(str(key or "").strip().lower())
+                if value not in (None, "", " "):
+                    return value
+            return None
+
+        def _parse_positive_float(value: Any) -> float | None:
+            text = _clean_text(value) or str(value or "").strip()
+            if not text:
+                return None
+            normalized = text.lower().replace("seconds", "").replace("second", "").replace("sec", "").strip()
+            if normalized.startswith("f/"):
+                normalized = normalized[2:].strip()
+            if normalized.endswith("s"):
+                normalized = normalized[:-1].strip()
+            if "(" in normalized and ")" in normalized:
+                normalized = normalized.split("(", 1)[0].strip()
+            if not normalized:
+                return None
+            if "/" in normalized:
+                left, _, right = normalized.partition("/")
+                try:
+                    numerator = float(left.strip())
+                    denominator = float(right.strip())
+                except Exception:
+                    return None
+                if denominator == 0:
+                    return None
+                parsed = numerator / denominator
+            else:
+                try:
+                    parsed = float(normalized)
+                except Exception:
+                    return None
+            return parsed if parsed > 0 else None
+
+        def _parse_optional_int(value: Any) -> int | None:
+            text = _clean_text(value) or str(value or "").strip()
+            if not text:
+                return None
+            normalized = text.strip()
+            if normalized.upper().startswith("ISO"):
+                normalized = normalized[3:].strip()
+            try:
+                parsed = int(float(normalized))
+            except Exception:
+                return None
+            return parsed if parsed >= 0 else None
+
+        shutter_raw = _first_value(
+            "ExifIFD:ExposureTime",
+            "EXIF:ExposureTime",
+            "XMP-exif:ExposureTime",
+            "Composite:ShutterSpeed",
+            "ExposureTime",
+            "ShutterSpeed",
+        )
+        iso_raw = _first_value(
+            "ExifIFD:ISO",
+            "EXIF:ISO",
+            "XMP-exif:PhotographicSensitivity",
+            "XMP-exif:ISOSpeedRatings",
+            "ISO",
+            "PhotographicSensitivity",
+            "ISOSpeedRatings",
+        )
+        aperture_raw = _first_value(
+            "ExifIFD:FNumber",
+            "EXIF:FNumber",
+            "XMP-exif:FNumber",
+            "Composite:Aperture",
+            "FNumber",
+            "Aperture",
+            "ApertureValue",
+        )
+
+        shutter_seconds = _parse_positive_float(shutter_raw)
+        iso_value = _parse_optional_int(iso_raw)
+        aperture_value = _parse_positive_float(aperture_raw)
+
+        if shutter_seconds is None:
+            shutter_text = _clean_text(shutter_raw) or "-"
+        elif shutter_seconds < 1:
+            denominator = round(1.0 / shutter_seconds) if shutter_seconds > 0 else 0
+            shutter_text = f"1/{denominator}s" if denominator > 0 else "-"
+        else:
+            shutter_text = f"{shutter_seconds:g}s"
+
+        iso_text = str(iso_value) if iso_value is not None else (_clean_text(iso_raw) or "-")
+        aperture_text = f"f/{aperture_value:g}" if aperture_value is not None else (_clean_text(aperture_raw) or "-")
+
+        return (
+            shutter_text,
+            (0, shutter_seconds) if shutter_seconds is not None else (1, 0.0),
+            iso_text,
+            (0, iso_value) if iso_value is not None else (1, 0),
+            aperture_text,
+            (0, aperture_value) if aperture_value is not None else (1, 0.0),
+        )
+
     def _remember_photo_item(self, path: Path, item: QTreeWidgetItem) -> None:
         self._photo_item_map[_path_key(path)] = item
 
@@ -1768,16 +1893,23 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         try:
             if enabled:
                 header.setSectionResizeMode(PHOTO_COL_CAPTURE_TIME, QHeaderView.ResizeMode.Interactive)
+                header.setSectionResizeMode(PHOTO_COL_TITLE, QHeaderView.ResizeMode.Interactive)
                 header.setSectionResizeMode(PHOTO_COL_RATIO, QHeaderView.ResizeMode.Interactive)
                 header.setSectionResizeMode(PHOTO_COL_RATING, QHeaderView.ResizeMode.Interactive)
+                header.setSectionResizeMode(PHOTO_COL_SHUTTER, QHeaderView.ResizeMode.Interactive)
+                header.setSectionResizeMode(PHOTO_COL_ISO, QHeaderView.ResizeMode.Interactive)
+                header.setSectionResizeMode(PHOTO_COL_APERTURE, QHeaderView.ResizeMode.Interactive)
                 self._photo_list_header_fast_mode = True
                 return
             header.setSectionResizeMode(PHOTO_COL_SEQ, QHeaderView.ResizeMode.Fixed)
-            header.setSectionResizeMode(PHOTO_COL_NAME, QHeaderView.ResizeMode.Stretch)
-            header.setSectionResizeMode(PHOTO_COL_CAPTURE_TIME, QHeaderView.ResizeMode.ResizeToContents)
-            header.setSectionResizeMode(PHOTO_COL_TITLE, QHeaderView.ResizeMode.Stretch)
-            header.setSectionResizeMode(PHOTO_COL_RATIO, QHeaderView.ResizeMode.ResizeToContents)
-            header.setSectionResizeMode(PHOTO_COL_RATING, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(PHOTO_COL_NAME, QHeaderView.ResizeMode.Interactive)
+            header.setSectionResizeMode(PHOTO_COL_CAPTURE_TIME, QHeaderView.ResizeMode.Interactive)
+            header.setSectionResizeMode(PHOTO_COL_TITLE, QHeaderView.ResizeMode.Interactive)
+            header.setSectionResizeMode(PHOTO_COL_RATIO, QHeaderView.ResizeMode.Interactive)
+            header.setSectionResizeMode(PHOTO_COL_RATING, QHeaderView.ResizeMode.Interactive)
+            header.setSectionResizeMode(PHOTO_COL_SHUTTER, QHeaderView.ResizeMode.Interactive)
+            header.setSectionResizeMode(PHOTO_COL_ISO, QHeaderView.ResizeMode.Interactive)
+            header.setSectionResizeMode(PHOTO_COL_APERTURE, QHeaderView.ResizeMode.Interactive)
             header.setSectionResizeMode(PHOTO_COL_ROW, QHeaderView.ResizeMode.Fixed)
             self._photo_list_header_fast_mode = False
         except Exception:
@@ -1966,6 +2098,14 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         title = self._extract_display_title_from_metadata(photo_info)
         rating_value = self._extract_display_rating_from_metadata(photo_info)
         rating_text = self._format_rating_display(rating_value)
+        (
+            shutter_text,
+            shutter_sort,
+            iso_text,
+            iso_sort,
+            aperture_text,
+            aperture_sort,
+        ) = self._extract_display_camera_settings_from_metadata(photo_info)
         active_settings = (
             settings
             if isinstance(settings, dict)
@@ -1979,14 +2119,23 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         item.setText(PHOTO_COL_TITLE, title or "-")
         item.setText(PHOTO_COL_RATIO, ratio_text)
         item.setText(PHOTO_COL_RATING, rating_text)
+        item.setText(PHOTO_COL_SHUTTER, shutter_text)
+        item.setText(PHOTO_COL_ISO, iso_text)
+        item.setText(PHOTO_COL_APERTURE, aperture_text)
         item.setToolTip(PHOTO_COL_NAME, str(path))
         item.setToolTip(PHOTO_COL_CAPTURE_TIME, capture_time_text if capture_time_text != "-" else "")
         item.setToolTip(PHOTO_COL_TITLE, title or "")
         item.setToolTip(PHOTO_COL_RATIO, ratio_text)
         item.setToolTip(PHOTO_COL_RATING, rating_text)
+        item.setToolTip(PHOTO_COL_SHUTTER, shutter_text if shutter_text != "-" else "")
+        item.setToolTip(PHOTO_COL_ISO, iso_text if iso_text != "-" else "")
+        item.setToolTip(PHOTO_COL_APERTURE, aperture_text if aperture_text != "-" else "")
         item.setTextAlignment(PHOTO_COL_CAPTURE_TIME, int(Qt.AlignmentFlag.AlignCenter))
         item.setTextAlignment(PHOTO_COL_RATIO, int(Qt.AlignmentFlag.AlignCenter))
         item.setTextAlignment(PHOTO_COL_RATING, int(Qt.AlignmentFlag.AlignCenter))
+        item.setTextAlignment(PHOTO_COL_SHUTTER, int(Qt.AlignmentFlag.AlignCenter))
+        item.setTextAlignment(PHOTO_COL_ISO, int(Qt.AlignmentFlag.AlignCenter))
+        item.setTextAlignment(PHOTO_COL_APERTURE, int(Qt.AlignmentFlag.AlignCenter))
         item.setData(PHOTO_COL_NAME, PHOTO_LIST_SORT_ROLE, (0, filename_text.casefold()))
         item.setData(PHOTO_COL_CAPTURE_TIME, PHOTO_LIST_SORT_ROLE, capture_time_sort)
         item.setData(PHOTO_COL_TITLE, PHOTO_LIST_SORT_ROLE, (0, title.casefold()) if title else (1, ""))
@@ -2000,6 +2149,9 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
             PHOTO_LIST_SORT_ROLE,
             (0, int(rating_value)) if rating_value is not None else (1, 0),
         )
+        item.setData(PHOTO_COL_SHUTTER, PHOTO_LIST_SORT_ROLE, shutter_sort)
+        item.setData(PHOTO_COL_ISO, PHOTO_LIST_SORT_ROLE, iso_sort)
+        item.setData(PHOTO_COL_APERTURE, PHOTO_LIST_SORT_ROLE, aperture_sort)
         if resort:
             self.photo_list.resort()
 
@@ -2049,7 +2201,7 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
 
             current_settings = self._photo_override_settings_from_snapshot(default_settings)
             self.photo_render_overrides[key] = current_settings
-            item = PhotoListItem(["", "", "", "", "", "", ""])
+            item = PhotoListItem(["", "", "", "", "", "", "", "", "", ""])
             sequence_value = self._next_photo_sequence_value()
             item.setData(PHOTO_COL_SEQ, PHOTO_LIST_SORT_ROLE, (0, sequence_value))
             item.setData(PHOTO_COL_ROW, PHOTO_LIST_PATH_ROLE, str(path))
@@ -2259,6 +2411,83 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         self._photo_list_metadata_pending_keys.discard(key)
         return raw_metadata
 
+    def _load_raw_metadata_batch(self, paths: list[Path]) -> dict[str, dict[str, Any]]:
+        """批量预取导出所需 metadata，避免逐张重复触发 exiftool / sidecar 读取。"""
+        metadata_by_key: dict[str, dict[str, Any]] = {}
+        pending_entries: list[tuple[Path, str, Path]] = []
+        seen_keys: set[str] = set()
+        current_key = _path_key(self.current_path) if self.current_path is not None else ""
+
+        for path in paths:
+            key = _path_key(path)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+
+            cached = self.raw_metadata_cache.get(key)
+            if isinstance(cached, dict) and cached:
+                metadata_by_key[key] = cached
+                continue
+
+            if key == current_key and isinstance(self.current_raw_metadata, dict) and self.current_raw_metadata:
+                current_metadata = dict(self.current_raw_metadata)
+                self.raw_metadata_cache[key] = current_metadata
+                self.photo_list_metadata_cache[key] = dict(current_metadata)
+                self._photo_list_metadata_pending_keys.discard(key)
+                metadata_by_key[key] = current_metadata
+                continue
+
+            pending_entries.append((path, key, path.resolve(strict=False)))
+
+        if not pending_entries:
+            return metadata_by_key
+
+        resolved_paths = [resolved for _path, _key, resolved in pending_entries]
+        try:
+            full_batch = extract_many_with_xmp_priority(resolved_paths, mode="auto")
+        except Exception:
+            full_batch = {}
+        try:
+            batch_map = read_batch_metadata([str(resolved) for resolved in resolved_paths])
+        except Exception:
+            batch_map = {}
+
+        for path, key, resolved in pending_entries:
+            raw_metadata = full_batch.get(resolved)
+            if isinstance(raw_metadata, dict) and raw_metadata:
+                merged = dict(raw_metadata)
+            else:
+                list_cached = self.photo_list_metadata_cache.get(key)
+                if isinstance(list_cached, dict) and list_cached:
+                    merged = dict(list_cached)
+                else:
+                    try:
+                        merged = extract_metadata_with_xmp_priority(resolved, mode="auto")
+                    except Exception:
+                        try:
+                            raw_map = extract_many([resolved], mode="auto")
+                            merged = raw_map.get(resolved) or extract_pillow_metadata(path)
+                        except Exception:
+                            merged = extract_pillow_metadata(path)
+
+            if not isinstance(merged, dict):
+                merged = {"SourceFile": str(path)}
+            merged.setdefault("SourceFile", str(path))
+
+            if isinstance(batch_map, dict) and batch_map:
+                batch_metadata = batch_map.get(os.path.normpath(str(resolved))) or batch_map.get(str(resolved))
+                if isinstance(batch_metadata, dict) and batch_metadata:
+                    combined = dict(merged)
+                    combined.update(batch_metadata)
+                    merged = combined
+
+            self.raw_metadata_cache[key] = merged
+            self.photo_list_metadata_cache[key] = dict(merged)
+            self._photo_list_metadata_pending_keys.discard(key)
+            metadata_by_key[key] = merged
+
+        return metadata_by_key
+
     def _suggest_video_output_path(self, container: str) -> Path:
         suffix = str(container or "mp4").strip().lower().lstrip(".") or "mp4"
         paths = self._list_photo_paths()
@@ -2274,26 +2503,40 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
             return base_dir / f"birdstamp_video_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{suffix}"
         return Path.cwd() / f"birdstamp_video_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{suffix}"
 
-    def _build_video_export_jobs(self, paths: list[Path]) -> list[VideoFrameJob]:
+    def _build_export_render_jobs(
+        self,
+        paths: list[Path],
+        *,
+        prefer_current_ui_for_current_path: bool = True,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> list[VideoFrameJob]:
         jobs: list[VideoFrameJob] = []
         current_key = _path_key(self.current_path) if self.current_path is not None else ""
         current_render_settings = self._build_current_render_settings()
         export_draw_banner = _parse_bool_value(current_render_settings.get("draw_banner"), True)
         export_draw_text = _parse_bool_value(current_render_settings.get("draw_text"), True)
         export_draw_focus = _parse_bool_value(current_render_settings.get("draw_focus"), False)
-        for path in paths:
-            raw_metadata = dict(self._load_raw_metadata(path))
+        total = len(paths)
+        metadata_by_key = self._load_raw_metadata_batch(paths)
+        if callable(progress_callback):
+            progress_callback(0, total)
+        for index, path in enumerate(paths, start=1):
+            raw_metadata = dict(metadata_by_key.get(_path_key(path)) or self._load_raw_metadata(path))
             photo_info = self._photo_info_for_display(path, raw_metadata=raw_metadata)
             metadata_context = _build_metadata_context(photo_info, raw_metadata)
-            settings = self._clone_render_settings(self._render_settings_for_path(path, prefer_current_ui=False))
-            # 视频导出时，叠加信息的三个总开关跟随当前界面状态，
+            is_current_path = bool(current_key and _path_key(path) == current_key)
+            if is_current_path and prefer_current_ui_for_current_path:
+                settings = self._clone_render_settings(current_render_settings)
+            else:
+                settings = self._clone_render_settings(self._render_settings_for_path(path, prefer_current_ui=False))
+            # 导出图像时，叠加信息的三个总开关统一跟随当前界面状态，
             # 但仍保留每张照片各自的模板/裁切重载。
             settings["draw_banner"] = export_draw_banner
             settings["draw_text"] = export_draw_text
             settings["draw_focus"] = export_draw_focus
 
             source_image = None
-            if self.current_source_image is not None and current_key and _path_key(path) == current_key:
+            if self.current_source_image is not None and is_current_path:
                 source_image = self.current_source_image.copy()
 
             jobs.append(
@@ -2306,6 +2549,8 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
                     source_image=source_image,
                 )
             )
+            if callable(progress_callback):
+                progress_callback(index, total)
         return jobs
 
     def _cleanup_video_export_worker(self) -> None:
@@ -2404,7 +2649,7 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
                 return
             self._video_export_last_output_dir = output_path.parent
             self._save_video_export_last_output_dir(output_path.parent)
-            jobs = self._build_video_export_jobs(paths)
+            jobs = self._build_export_render_jobs(paths, prefer_current_ui_for_current_path=True)
         except Exception as exc:
             self._show_error("视频导出参数无效", str(exc))
             return

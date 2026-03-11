@@ -839,8 +839,6 @@ class TemplateManagerDialog(QDialog):
 
         with stat_span("tmpl_build_header_group"):
             layout.addWidget(self._build_header_group())
-        with stat_span("tmpl_build_crop_group"):
-            layout.addWidget(self._build_crop_group())
         with stat_span("tmpl_build_fields_group"):
             layout.addWidget(self._build_fields_group(), stretch=1)
         with stat_span("tmpl_build_field_edit_group"):
@@ -1014,16 +1012,6 @@ class TemplateManagerDialog(QDialog):
 
         self._banner_color_row_widget = row
         return row
-
-    def _build_crop_group(self) -> QGroupBox:
-        """裁切填充 GroupBox：边界填充 + 外圈颜色。"""
-        group = QGroupBox("裁切填充")
-        form = QFormLayout(group)
-        _configure_form_layout(form)
-        self._tmpl_crop_padding_widget = _CropPaddingEditorWidget()
-        self._tmpl_crop_padding_widget.changed.connect(self._on_tmpl_crop_padding_changed)
-        form.addRow("边界填充 / 外圈颜色", self._tmpl_crop_padding_widget)
-        return group
 
     def _build_fields_group(self) -> QGroupBox:
         """文本项 GroupBox：列表 + 新增/删除按钮。"""
@@ -1297,13 +1285,6 @@ class TemplateManagerDialog(QDialog):
                     payload.get("banner_gradient_height_pct") or _BANNER_GRADIENT_HEIGHT_PCT_DEFAULT
                 ),
             )
-            self._tmpl_crop_padding_widget.set_values(
-                top=int(payload.get("crop_padding_top") or 0),
-                bottom=int(payload.get("crop_padding_bottom") or 0),
-                left=int(payload.get("crop_padding_left") or 0),
-                right=int(payload.get("crop_padding_right") or 0),
-                fill=str(payload.get("crop_padding_fill") or "#FFFFFF"),
-            )
         finally:
             self._updating = False
         self._populate_field_list(payload.get("fields") or [])
@@ -1574,13 +1555,6 @@ class TemplateManagerDialog(QDialog):
         if self._updating or not self.current_payload:
             return
         self.current_payload.update(self._gradient_editor.get_values())
-        self._save_current_template()
-        self._refresh_preview()
-
-    def _on_tmpl_crop_padding_changed(self) -> None:
-        if self._updating or not self.current_payload:
-            return
-        self.current_payload.update(self._tmpl_crop_padding_widget.get_values())
         self._save_current_template()
         self._refresh_preview()
 
