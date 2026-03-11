@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import threading
+import time
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from datetime import datetime
@@ -355,6 +356,7 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         self._photo_list_header_fast_mode = False
         self._pending_preview_fit_reset: bool = False
         self._video_export_worker: VideoExportWorker | None = None
+        self._video_export_started_at: float | None = None
         self._image_export_progress_token: int = 0
         self._image_export_active_worker_count: int = 0
         self._image_export_last_output_dir: Path | None = self._load_image_export_last_output_dir()
@@ -2563,14 +2565,31 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         self.video_export_panel.set_status_text(message)
         self._set_status(message)
 
+    def _consume_video_export_elapsed_time(self) -> float | None:
+        started_at = self._video_export_started_at
+        self._video_export_started_at = None
+        if started_at is None:
+            return None
+        return max(0.0, time.perf_counter() - started_at)
+
     def _on_video_export_succeeded(self, output_path_text: str) -> None:
         output_path = Path(output_path_text)
-        self.video_export_panel.set_busy(False, status_text=f"视频导出完成: {output_path}")
-        self._set_status(f"视频导出完成: {output_path}")
+        elapsed = self._consume_video_export_elapsed_time()
+        timing_text = (
+            f" | 视频生成耗时 {self._format_export_elapsed_time(elapsed)}"
+            if elapsed is not None
+            else ""
+        )
+        message = f"视频导出完成: {output_path}{timing_text}"
+        self.video_export_panel.set_busy(False, status_text=message)
+        self._set_status(message)
         self._cleanup_video_export_worker()
 
     def _on_video_export_cancelled(self, message: str) -> None:
         cancel_text = str(message or "").strip() or "视频导出已中断。"
+        elapsed = self._consume_video_export_elapsed_time()
+        if elapsed is not None:
+            cancel_text = f"{cancel_text} | 已耗时 {self._format_export_elapsed_time(elapsed)}"
         self.video_export_panel.set_busy(False, status_text=cancel_text)
         self._set_status(cancel_text)
         self._cleanup_video_export_worker()
@@ -2578,8 +2597,12 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
 
     def _on_video_export_failed(self, message: str) -> None:
         error_text = str(message or "").strip() or "未知错误"
-        self.video_export_panel.set_busy(False, status_text=f"视频导出失败: {error_text}")
-        self._set_status(f"视频导出失败: {error_text}")
+        elapsed = self._consume_video_export_elapsed_time()
+        status_text = f"视频导出失败: {error_text}"
+        if elapsed is not None:
+            status_text = f"{status_text} | 已耗时 {self._format_export_elapsed_time(elapsed)}"
+        self.video_export_panel.set_busy(False, status_text=status_text)
+        self._set_status(status_text)
         self._cleanup_video_export_worker()
         self._show_error("视频导出失败", error_text)
 
@@ -2666,6 +2689,7 @@ class BirdStampEditorWindow(QMainWindow, _BirdStampCropMixin, _BirdStampRenderer
         worker.exportFailed.connect(self._on_video_export_failed)
         worker.finished.connect(worker.deleteLater)
         self._video_export_worker = worker
+        self._video_export_started_at = time.perf_counter()
 
         self.video_export_panel.set_busy(True, status_text=f"准备生成视频，共 {len(jobs)} 帧。")
         self._set_status(f"准备生成视频，共 {len(jobs)} 帧。")

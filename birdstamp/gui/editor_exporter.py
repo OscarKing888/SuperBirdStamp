@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 import threading
+import time
 
 from PIL import Image
 from PyQt6.QtCore import QEventLoop, QTimer
@@ -33,6 +34,29 @@ class _ImageExportTask:
 
 class _BirdStampExporterMixin:
     """Mixin: export_current, export_all, _save_image."""
+
+    def _format_export_elapsed_time(self, elapsed_seconds: float) -> str:
+        seconds = max(0.0, float(elapsed_seconds or 0.0))
+        if seconds < 60.0:
+            return f"{seconds:.1f}秒"
+
+        total_minutes = int(seconds // 60.0)
+        second_value = seconds - total_minutes * 60.0
+        if total_minutes < 60:
+            return f"{total_minutes}分{second_value:04.1f}秒"
+
+        hours = total_minutes // 60
+        minutes = total_minutes % 60
+        return f"{hours}小时{minutes:02d}分{second_value:04.1f}秒"
+
+    def _format_image_export_timing_summary(self, total_images: int, elapsed_seconds: float) -> str:
+        total = max(1, int(total_images or 0))
+        elapsed = max(0.0, float(elapsed_seconds or 0.0))
+        average = elapsed / float(total)
+        return (
+            f"总时长 {self._format_export_elapsed_time(elapsed)}，"
+            f"平均每张 {self._format_export_elapsed_time(average)}"
+        )
 
     def _format_image_export_progress_text(
         self,
@@ -177,6 +201,7 @@ class _BirdStampExporterMixin:
             return
 
         target = self._normalized_image_export_target(Path(file_path), default_suffix=suffix)
+        started_at = time.perf_counter()
         jobs = self._build_export_render_jobs([self.current_path], prefer_current_ui_for_current_path=True)
         try:
             self._export_render_jobs_to_images(jobs, [target], label="导出当前")
@@ -187,7 +212,9 @@ class _BirdStampExporterMixin:
         remembered_target_dir = target.parent.resolve(strict=False)
         self._image_export_last_output_dir = remembered_target_dir
         self._save_image_export_last_output_dir(remembered_target_dir)
-        self._set_status(f"导出完成: {target}")
+        elapsed = time.perf_counter() - started_at
+        timing_text = self._format_image_export_timing_summary(1, elapsed)
+        self._set_status(f"导出完成: {target} | {timing_text}")
 
     def export_all(self) -> None:
         paths = self._list_photo_paths()
@@ -216,6 +243,7 @@ class _BirdStampExporterMixin:
         self._save_batch_export_last_output_dir(remembered_output_dir)
 
         targets = self._build_batch_image_targets(paths, out_dir=out_dir, suffix=suffix)
+        started_at = time.perf_counter()
         prepare_token = self._begin_image_export_progress(total=len(paths), label="批量导出", phase_text="准备中", worker_count=0)
         self._set_status(f"批量导出准备中: 0/{len(paths)}")
 
@@ -239,7 +267,9 @@ class _BirdStampExporterMixin:
             if len(failed) > 8:
                 preview += f"\n... 另有 {len(failed) - 8} 项失败"
             QMessageBox.warning(self, "批量导出", f"成功 {len(ok_paths)}，失败 {len(failed)}\n\n{preview}")
-        self._set_status(f"批量导出完成: 成功 {len(ok_paths)}，失败 {len(failed)}")
+        elapsed = time.perf_counter() - started_at
+        timing_text = self._format_image_export_timing_summary(len(targets), elapsed)
+        self._set_status(f"批量导出完成: 成功 {len(ok_paths)}，失败 {len(failed)} | {timing_text}")
 
     def _normalized_image_export_target(self, target: Path, *, default_suffix: str) -> Path:
         if target.suffix.lower() in {".png", ".jpg", ".jpeg"}:
